@@ -42,6 +42,9 @@ env:
 jobs:
   timing:
     name: S-8 ${{ inputs.mode }} on ${{ inputs.machine }}
+    # Public repository: only a manual dispatch in this repository itself
+    # (never a fork or pull request) may reach the self-hosted runner.
+    if: github.repository == 'sila-network/sila-timing-lab' && github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, sila-s8, "${{ inputs.machine }}"]
     timeout-minutes: 720
     defaults:

@@ -1,8 +1,8 @@
-# SILA timing lab (private)
+# SILA timing lab
 
 Copyright 2026 Ahmed Ibrahim. Apache-2.0.
 
-This private repository runs the **S-8 dedicated-hardware timing
+This repository runs the **S-8 dedicated-hardware timing
 measurement** of SILA secp256k1 (Issue #4 of
 `sila-network/sila-core-primitives`). It runs on temporary single-job
 runners registered only here, never on the public SILA repository.
@@ -27,9 +27,18 @@ runners registered only here, never on the public SILA repository.
 
 ## Security model
 
-- The repository is private. The workflow starts only by manual dispatch
-  from someone with write access; there is no push, pull_request or
-  schedule trigger.
+- The repository is **public**, so its stored results are public. They
+  contain no secrets: machine facts, Go version, SHA, t values and
+  verdicts.
+- `s8-timing.yml` starts only by manual dispatch from someone with write
+  access, in this repository itself. It has no push, pull_request or
+  schedule trigger, and the job carries a repository/event guard.
+- A public repository with self-hosted runners has one more risk: a
+  fork's pull request could carry its own workflow aimed at the runner
+  labels. Settings → Actions → General → "Approval for running fork pull
+  request workflows from contributors" must be **"Require approval for
+  all external contributors"**. In addition, runners exist only while a
+  measurement is running and accept a single job.
 - Runners are **ephemeral**: they accept exactly one job, then remove
   their own registration. The servers are deleted after use.
 - Registration tokens are typed only into a hidden prompt on the machine.
@@ -42,6 +51,10 @@ runners registered only here, never on the public SILA repository.
   throwaway keys in memory.
 
 ## One-time repository settings (owner)
+
+0. Settings → Actions → General → set fork pull request approval to
+   **"Require approval for all external contributors"** (see Security
+   model).
 
 1. Settings → Secrets and variables → Actions → **Variables** → add
    `SILA_COMMIT_EMAIL`, the e-mail used for the "SILA Network" author of
@@ -62,7 +75,17 @@ The console shows the final price, including VAT, before ordering.
 | Public IPv4 | | | a few cents for 3 h | | < €0.10 |
 | **Total** | | | | | **≈ €5.4 excl. VAT; ≈ €6.5 with 20 % VAT (≈ $7.5)** |
 
-Read the total against the $10 limit:
+**Owner's current limit: $3–5 for both machines.** The M2 Pro alone
+(€5.04 excl. VAT for the 24 h minimum) exceeds it. Within the limit, only
+**Mac mini M1 - M** fits:
+
+| Machines | Cost excl. VAT | With 20 % VAT |
+|---|---|---|
+| M1 for 24 h (€2.64) + EM-A210R-SATA for ~3 h (≈€0.25) + IPv4 | ≈ €2.95 | ≈ €3.55 (≈ $4.1) |
+
+That leaves no room for a second Mac day or a long AMD retry.
+
+Earlier analysis for a $10 limit:
 - **Mac retries:** a second 24 h block on the Mac (+€6) would exceed the
   limit, so every Mac retry must happen within the first 24 h.
 - **x86-64 retries:** a repeat run costs about €0.20.
