@@ -222,23 +222,29 @@ jobs:
           [ -n "$COMMIT_EMAIL" ] || { echo "::error::SILA_COMMIT_EMAIL is not set; results are in the job log above only"; exit 1; }
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
           echo "::add-mask::$auth"
-          dest="$RUNNER_TEMP/lab"
-          rm -rf "$dest"
-          git -c "http.extraheader=AUTHORIZATION: basic $auth" clone -q --depth 1 "https://github.com/$GITHUB_REPOSITORY.git" "$dest"
-          mkdir -p "$dest/results/$MACHINE"
-          cp -R "$OUT" "$dest/results/$MACHINE/"
-          cd "$dest"
-          git add results
-          git -c user.name="SILA Network" -c user.email="$COMMIT_EMAIL" commit -q \
-            -m "S-8 $MODE results: $MACHINE, run $GITHUB_RUN_ID (SILA $SILA_SHA)"
-          # Another machine's run may have stored results meanwhile:
-          # rebase this one new commit and retry.
+          # Each attempt starts from a fresh shallow clone of the newest main,
+          # so a result commit stored meanwhile by the other machine is never
+          # rebased or merged; the identity is set in the clone itself.
           for i in 1 2 3; do
-            git -c "http.extraheader=AUTHORIZATION: basic $auth" push -q origin HEAD:main && break
-            [ "$i" = 3 ] && { echo "::error::could not push the results; they are in the job log above"; exit 1; }
-            git -c "http.extraheader=AUTHORIZATION: basic $auth" pull -q --rebase --depth 1 origin main
+            dest="$RUNNER_TEMP/lab-store-$i"
+            rm -rf "$dest"
+            git -c "http.extraheader=AUTHORIZATION: basic $auth" clone -q --depth 1 --branch main \
+              "https://github.com/$GITHUB_REPOSITORY.git" "$dest"
+            git -C "$dest" config user.name "SILA Network"
+            git -C "$dest" config user.email "$COMMIT_EMAIL"
+            mkdir -p "$dest/results/$MACHINE"
+            cp -R "$OUT" "$dest/results/$MACHINE/"
+            git -C "$dest" add results
+            git -C "$dest" commit -q -m "S-8 $MODE results: $MACHINE, run $GITHUB_RUN_ID (SILA $SILA_SHA)"
+            if git -C "$dest" -c "http.extraheader=AUTHORIZATION: basic $auth" push -q origin HEAD:main; then
+              echo "stored: results/$MACHINE/$(basename "$OUT") ($(git -C "$dest" rev-parse HEAD))"
+              exit 0
+            fi
+            echo "push attempt $i rejected; retrying from the newest main"
+            sleep $((i * 5))
           done
-          echo "stored: results/$MACHINE/$(basename "$OUT")"
+          echo "::error::could not push the results; they are in the job log above"
+          exit 1
 
       - name: Remove job-local files
         if: always()
