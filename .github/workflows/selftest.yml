@@ -42,8 +42,20 @@ jobs:
           # The job needs self-hosted + sila-s8 + the machine label; the
           # runner keeps its default labels (incl. self-hosted) and adds ours.
           grep -q 'runs-on: \[self-hosted, sila-s8, ' .github/workflows/s8-timing.yml
-          ! grep -q -- '--no-default-labels' runner/register.sh
+          # (no "! grep": a negated command never fails a "bash -e" step)
+          if grep -q -- '--no-default-labels' runner/register.sh; then echo "::error::--no-default-labels drops self-hosted"; exit 1; fi
           grep -q -- '--labels "sila-s8,$label"' runner/register.sh
           echo "labels ok"
+      - name: Timing workflow guards
+        run: |
+          w=.github/workflows/s8-timing.yml
+          grep -q "github.ref == 'refs/heads/main'" $w              # main branch only
+          grep -q "github.event_name == 'workflow_dispatch'" $w     # manual only
+          if grep -nE '^\s+(push|pull_request|pull_request_target|schedule):' $w; then echo "::error::automatic trigger"; exit 1; fi
+          if grep -nE '(checkout|fetch).*\|\| *true|\"\$GITHUB_SHA\" *\|\|' $w; then echo "::error::ignored checkout/fetch failure"; exit 1; fi
+          grep -q '\[ "\$head" = "\$GITHUB_SHA" \]' $w            # exact dispatched commit
+          grep -q 'SILA_COMMIT_EMAIL is not set; set it before starting' $w
+          if grep -rni 'private repository' $w runner README.md; then echo "::error::stale 'private' wording"; exit 1; fi
+          echo "guards ok"
       - name: Evidence check accepts only complete passing runs
         run: bash scripts/test_check_evidence.sh

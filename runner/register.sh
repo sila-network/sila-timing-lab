@@ -3,7 +3,7 @@
 # Copyright 2026 Ahmed Ibrahim
 #
 # Registers THIS machine as a temporary, single-job (ephemeral) GitHub
-# Actions runner for the private repository sila-network/sila-timing-lab,
+# Actions runner for the public repository sila-network/sila-timing-lab,
 # then starts it in the background. After one job the runner removes its
 # own registration and stops.
 #

@@ -32,7 +32,11 @@ runners registered only here, never on the public SILA repository.
   verdicts.
 - `s8-timing.yml` starts only by manual dispatch from someone with write
   access, in this repository itself. It has no push, pull_request or
-  schedule trigger, and the job carries a repository/event guard.
+  schedule trigger.
+- The job guard accepts only the **main** branch of this repository.
+- The lab scripts are fetched at exactly the dispatched commit
+  (`GITHUB_SHA`). Any fetch or checkout failure, a different commit or a
+  modified tree stops the job before anything else runs.
 - A public repository with self-hosted runners has one more risk: a
   fork's pull request could carry its own workflow aimed at the runner
   labels. Settings → Actions → General → "Approval for running fork pull
@@ -58,7 +62,10 @@ runners registered only here, never on the public SILA repository.
 
 1. Settings → Secrets and variables → Actions → **Variables** → add
    `SILA_COMMIT_EMAIL`, the e-mail used for the "SILA Network" author of
-   result commits.
+   result commits. The workflow checks it **before** any measurement and
+   stops if it is missing, so no hardware time is spent on a run whose
+   results could not be stored. Every raw file is also printed to the job
+   log before the commit.
 2. Settings → Actions → General → Workflow permissions: keep the default;
    the workflow asks for `contents: write` itself.
 
@@ -117,10 +124,9 @@ the workflow, watches it and reads the results; the owner's part is marked
      console shows; or
    - the console's VNC / Screen Sharing link → Terminal.
 
-   On GitHub, open `runner/register.sh`, tap **Raw**, and copy the URL. It
-   is a temporary signed link to this private file. Then run:
+   Then run (the repository is public, so no sign-in is needed):
    ```sh
-   curl -fsSL '<raw URL>' -o r.sh && bash r.sh arm64-mac
+   curl -fsSL https://raw.githubusercontent.com/sila-network/sila-timing-lab/main/runner/register.sh -o r.sh && bash r.sh arm64-mac
    ```
    Paste the token when asked (hidden), then close the session.
 4. **Claude:**

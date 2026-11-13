@@ -4,7 +4,8 @@
 # S-8 dedicated-hardware timing for SILA secp256k1 (Issue #4 of
 # sila-network/sila-core-primitives). Manual start only. Runs on a
 # temporary, single-job (ephemeral) self-hosted runner registered to this
-# private repository; never on GitHub-hosted runners.
+# public repository; never on GitHub-hosted runners. Only the main branch
+# may be dispatched (job guard below).
 name: S-8 dedicated timing
 
 on:
@@ -23,7 +24,7 @@ on:
         options: [full, preflight]
 
 permissions:
-  contents: write # only to store the raw results in this private repository
+  contents: write # only to store the raw results in this repository (public)
 
 concurrency:
   group: s8-${{ inputs.machine }}
@@ -42,28 +43,50 @@ env:
 jobs:
   timing:
     name: S-8 ${{ inputs.mode }} on ${{ inputs.machine }}
-    # Public repository: only a manual dispatch in this repository itself
-    # (never a fork or pull request) may reach the self-hosted runner.
-    if: github.repository == 'sila-network/sila-timing-lab' && github.event_name == 'workflow_dispatch'
+    # Public repository: only a manual dispatch of the main branch in this
+    # repository itself (never a fork, a pull request or another branch)
+    # may reach the self-hosted runner.
+    if: >-
+      github.repository == 'sila-network/sila-timing-lab' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
     runs-on: [self-hosted, sila-s8, "${{ inputs.machine }}"]
     timeout-minutes: 720
     defaults:
       run:
         shell: bash
     steps:
-      - name: Lab scripts (this repository) and result directory
+      - name: Results can be stored (fail before any measurement)
+        env:
+          COMMIT_EMAIL: ${{ vars.SILA_COMMIT_EMAIL }}
+        run: |
+          # Without this variable the result commit would fail after the
+          # measurement and the evidence would survive only in the job log.
+          if [ -z "$COMMIT_EMAIL" ]; then
+            echo "::error::Repository variable SILA_COMMIT_EMAIL is not set; set it before starting a measurement."
+            exit 1
+          fi
+
+      - name: Lab scripts at the dispatched commit (verified)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
           echo "::add-mask::$auth"
-          rm -rf "$GITHUB_WORKSPACE" && mkdir -p "$GITHUB_WORKSPACE"
-          git -c "http.extraheader=AUTHORIZATION: basic $auth" clone -q --depth 1 \
-            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_WORKSPACE"
-          git -C "$GITHUB_WORKSPACE" checkout -q "$GITHUB_SHA" 2>/dev/null || true
+          rm -rf "$GITHUB_WORKSPACE" && git init -q "$GITHUB_WORKSPACE" && cd "$GITHUB_WORKSPACE"
+          # Fetch exactly the dispatched commit; any failure stops the job,
+          # so no script from an unverified commit can run.
+          git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch -q --depth 1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -c advice.detachedHead=false checkout -q FETCH_HEAD
+          head=$(git rev-parse HEAD)
+          [ "$head" = "$GITHUB_SHA" ] || { echo "::error::lab checkout $head is not the dispatched commit $GITHUB_SHA"; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "::error::lab checkout not clean"; exit 1; }
+          echo "lab scripts: $GITHUB_REPOSITORY@$head ($GITHUB_REF)"
           out="$RUNNER_TEMP/s8-$MACHINE-$(date -u +%Y%m%dT%H%M%SZ)-run$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$out"
+          echo "lab commit: $head" > "$out/lab.txt"
           echo "OUT=$out" >> "$GITHUB_ENV"
 
       - name: Preflight (real hardware, CPU, DIT, isolation)
@@ -186,14 +209,17 @@ jobs:
       - name: Evaluate against the S-8 criteria
         run: bash "$GITHUB_WORKSPACE/scripts/check_evidence.sh" "$OUT" "$MACHINE" "$MODE" "$SILA_SHA"
 
-      - name: Store the raw results in this private repository
+      - name: Store the raw results in this repository
         if: always() && env.OUT != ''
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT_EMAIL: ${{ vars.SILA_COMMIT_EMAIL }}
         run: |
           set -euo pipefail
-          [ -n "$COMMIT_EMAIL" ] || { echo "repository variable SILA_COMMIT_EMAIL is not set; results are in the job log only"; exit 1; }
+          # Every raw file also goes to the job log first, so the evidence
+          # survives even if the commit below fails.
+          for f in "$OUT"/*; do echo "===== $(basename "$f")"; cat "$f"; done
+          [ -n "$COMMIT_EMAIL" ] || { echo "::error::SILA_COMMIT_EMAIL is not set; results are in the job log above only"; exit 1; }
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
           echo "::add-mask::$auth"
           dest="$RUNNER_TEMP/lab"
@@ -205,7 +231,13 @@ jobs:
           git add results
           git -c user.name="SILA Network" -c user.email="$COMMIT_EMAIL" commit -q \
             -m "S-8 $MODE results: $MACHINE, run $GITHUB_RUN_ID (SILA $SILA_SHA)"
-          git -c "http.extraheader=AUTHORIZATION: basic $auth" push -q origin HEAD
+          # Another machine's run may have stored results meanwhile:
+          # rebase this one new commit and retry.
+          for i in 1 2 3; do
+            git -c "http.extraheader=AUTHORIZATION: basic $auth" push -q origin HEAD:main && break
+            [ "$i" = 3 ] && { echo "::error::could not push the results; they are in the job log above"; exit 1; }
+            git -c "http.extraheader=AUTHORIZATION: basic $auth" pull -q --rebase --depth 1 origin main
+          done
           echo "stored: results/$MACHINE/$(basename "$OUT")"
 
       - name: Remove job-local files
