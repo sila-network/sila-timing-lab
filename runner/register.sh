@@ -45,7 +45,7 @@ IFS= read -rs token </dev/tty; echo >&2
 
 ./config.sh --unattended --url "$repo_url" --token "$token" \
 	--name "sila-s8-$label-$(date -u +%Y%m%d%H%M)" --labels "sila-s8,$label" \
-	--no-default-labels --ephemeral --replace --disableupdate >/dev/null
+	--ephemeral --replace --disableupdate >/dev/null
 unset token
 echo "registered: labels sila-s8,$label (ephemeral, one job)"
 

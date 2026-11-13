@@ -37,5 +37,13 @@ jobs:
           assert 'token' not in yaml.dump([f for f in d['write_files'] if f['path'] != '/opt/sila-s8/register.sh']).lower()
           print('cloud-init ok')
           PY
+      - name: Registered runner labels satisfy the timing job
+        run: |
+          # The job needs self-hosted + sila-s8 + the machine label; the
+          # runner keeps its default labels (incl. self-hosted) and adds ours.
+          grep -q 'runs-on: \[self-hosted, sila-s8, ' .github/workflows/s8-timing.yml
+          ! grep -q -- '--no-default-labels' runner/register.sh
+          grep -q -- '--labels "sila-s8,$label"' runner/register.sh
+          echo "labels ok"
       - name: Evidence check accepts only complete passing runs
         run: bash scripts/test_check_evidence.sh
