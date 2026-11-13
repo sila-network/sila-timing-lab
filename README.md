@@ -111,9 +111,12 @@ the workflow, watches it and reads the results; the owner's part is marked
 
 1. **(owner)** In this repository: Settings → Actions → Runners → **New
    self-hosted runner** → copy only the token shown after `--token`.
-2. **(owner)** Create the Mac mini in the Scaleway console with the
-   **Scaleway Dev OS** image. That image includes Homebrew and the Command
-   Line Tools, from which the workflow takes bash ≥ 4.4.
+2. **(owner)** Create the Mac mini in the Scaleway console. The
+   **Scaleway Dev OS** image, which has Homebrew, is preferred. On the
+   standard image, `register.sh` installs bash ≥ 4.4 with MacPorts and
+   asks once for the macOS password. If neither Homebrew nor MacPorts is
+   present, `register.sh` stops **before** registering, so no paid run
+   is wasted.
 
    Why: macOS `/bin/bash` 3.2 aborts `timing_dedicated.sh` on the empty
    `PIN` array under `set -u`, a bug fixed in bash 4.4. The workflow runs

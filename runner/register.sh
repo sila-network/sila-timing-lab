@@ -25,6 +25,27 @@ Linux-x86_64) pkg=linux-x64 ;;
 *) echo "unsupported platform $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
+if [ "$pkg" = osx-arm64 ]; then
+	# scripts/timing_dedicated.sh needs bash >= 4.4 (macOS /bin/bash is 3.2).
+	# Ensured here, while the owner is at the terminal, so a missing bash
+	# can never waste a paid measurement run.
+	nb=""
+	for c in /opt/homebrew/bin/bash /usr/local/bin/bash /opt/local/bin/bash; do
+		if [ -x "$c" ] && "$c" -c '[ "${BASH_VERSINFO[0]}${BASH_VERSINFO[1]}" -ge 44 ]'; then nb=$c; break; fi
+	done
+	if [ -z "$nb" ]; then
+		if command -v brew >/dev/null 2>&1; then
+			HOMEBREW_NO_AUTO_UPDATE=1 brew install --quiet bash
+		elif [ -x /opt/local/bin/port ]; then
+			echo "Installing bash with MacPorts (macOS asks for your password)" >&2
+			sudo /opt/local/bin/port -N install bash
+		else
+			echo "bash >= 4.4 is required: install Homebrew or MacPorts first" >&2
+			exit 1
+		fi
+	fi
+fi
+
 # Latest official runner release; its checksum is published in the
 # release notes and verified before anything is unpacked.
 rel=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest)
