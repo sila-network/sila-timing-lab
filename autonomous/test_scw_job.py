@@ -129,6 +129,12 @@ other_cmd = [{**r, "startup_command": ["/bin/true"]} for r in (sched_run, canary
 expect("overridden startup command is NOT ARMED", any("non-pinned" in p for p in armed(runs=other_cmd)), True)
 legacy = [{**r, "command": "true"} for r in (sched_run, canary_run)]
 expect("deprecated command override is NOT ARMED", any("non-pinned" in p for p in armed(runs=legacy)), True)
+partial = [{**sched_run, "environment_variables": {}}, {**canary_run, "environment_variables": {"REAPER_FLAGS": "--canary"}}]
+expect("runs with an incomplete environment are NOT ARMED (Codex P2)", any("non-pinned" in p for p in armed(runs=partial)), True)
+noenv = [{k: v for k, v in r.items() if k != "environment_variables"} for r in (sched_run, canary_run)]
+expect("runs without environment metadata are NOT ARMED", any("non-pinned" in p for p in armed(runs=noenv)), True)
+one_missing = {**sched_run, "environment_variables": {k: v for k, v in env0.items() if k != "REAPER_PART_3"}}
+expect("a run missing one code part is NOT ARMED", any("non-pinned" in p for p in armed(runs=[one_missing, canary_run])), True)
 hidden = [{k: v for k, v in r.items() if k not in ("startup_command", "args")} for r in (sched_run, canary_run)]
 expect("run records without command/args are never evidence", any("canary" in p for p in armed(runs=hidden)), True)
 api.shutdown()

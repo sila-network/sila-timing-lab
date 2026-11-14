@@ -119,12 +119,12 @@ def classify_run(run, want):
     if run.get("startup_command") != want["startup_command"] or run.get("args") != want["args"] or run.get("command"):
         return "foreign"
     want_env = want["environment_variables"]
-    env = run.get("environment_variables") or {}
-    for k, v in env.items():
-        if k == "REAPER_FLAGS":
-            continue
-        if want_env.get(k) != v:
-            return "foreign"
+    env = run.get("environment_variables")
+    if not isinstance(env, dict):
+        return "foreign"  # no environment metadata: not proof of the pinned execution
+    rest = {k: v for k, v in env.items() if k != "REAPER_FLAGS"}
+    if rest != want_env:
+        return "foreign"  # missing, extra or changed entries
     return ALLOWED_RUN_FLAGS.get(env.get("REAPER_FLAGS", ""), "foreign")
 
 
