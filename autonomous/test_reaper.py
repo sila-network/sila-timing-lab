@@ -44,6 +44,7 @@ fips = [{"id": "fip-s8", "tags": ["sila-s8"], "server_id": None, "project_id": P
         {"id": "fip-other-project", "tags": ["sila-s8"], "server_id": None, "project_id": OTHER}]
 state = {"filler": [], "total": None, "deny": set(), "fail_delete": set(), "sleep": 0, "ignore_filter": False}
 deleted = []
+created, live = [], set()
 
 
 class API(http.server.BaseHTTPRequestHandler):
@@ -63,6 +64,8 @@ class API(http.server.BaseHTTPRequestHandler):
             return self.send(401)
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
+        if u.path.endswith("/fips/canary-1"):
+            return self.send(200, {"id": "canary-1"}) if "canary-1" in live else self.send(404)
         kind = "servers" if "/servers" in u.path else "flexible_ips"
         if kind in state["deny"]:
             return self.send(403)
@@ -73,6 +76,15 @@ class API(http.server.BaseHTTPRequestHandler):
         total = state["total"] if (kind == "servers" and state["total"]) else len(items)
         self.send(200, {kind: items[(page - 1) * size: page * size], "total_count": total})
 
+    def do_POST(self):
+        if state.get("deny_create"):
+            return self.send(403)
+        n = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        created.append(body)
+        live.add("canary-1")
+        self.send(200, {"id": "canary-1", **body})
+
     def do_DELETE(self):
         rid = self.path.rsplit("/", 1)[1]
         if rid in state["fail_delete"]:
@@ -80,6 +92,8 @@ class API(http.server.BaseHTTPRequestHandler):
         if rid in state.get("gone", set()):
             return self.send(404)
         deleted.append(rid)
+        if not state.get("delete_noop"):
+            live.discard(rid)
         self.send(200)
 
 
@@ -163,6 +177,18 @@ rc, out, took = run()
 expect("timeout fails visibly and promptly", (rc, "timed out" in out, took < 10), (1, True, True))
 state["sleep"] = 0
 
+rc, out, _ = run("--canary")
+expect("canary creates a tagged IP in the project, deletes it and confirms 404",
+       (rc, "CANARY OK" in out, created[-1]["project_id"], sorted(created[-1]["tags"]), "canary-1" in live),
+       (0, True, P, ["sila-s8", "sila-s8-canary"], False))
+state["deny_create"] = True
+rc, out, _ = run("--canary")
+expect("canary without create permission fails visibly", (rc, "access denied 403" in out), (1, True))
+state["deny_create"] = False
+state["delete_noop"] = True
+rc, out, _ = run("--canary")
+expect("canary whose IP survives deletion fails visibly", (rc, "still present" in out), (1, True))
+state["delete_noop"] = False; live.clear()
 os.environ["SCW_PROJECT_ID"] = ""
 rc, out, _ = run()
 expect("missing project id refused", (rc, "project id" in out, deleted), (1, True, []))
@@ -170,6 +196,10 @@ os.environ["SCW_PROJECT_ID"] = P
 os.environ["SCW_SECRET_KEY"] = ""
 rc, out, _ = run()
 expect("missing key fails loudly", (rc, "SCW_SECRET_KEY is not set" in out), (1, True))
+p = __import__("subprocess").run([sys.executable, "-I", os.path.join(os.path.dirname(os.path.abspath(__file__)), "reaper.py"), "--dry-run"],
+                                  env={**os.environ, "SCW_API_URL": "https://attacker.example", "SCW_SECRET_KEY": "test-key"},
+                                  capture_output=True, text=True)
+expect("foreign SCW_API_URL refused before any request", (p.returncode, "refusing SCW_API_URL" in p.stdout), (1, True))
 api.shutdown()
 print(f"failures: {fails}")
 sys.exit(1 if fails else 0)

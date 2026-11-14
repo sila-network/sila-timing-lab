@@ -81,6 +81,47 @@ for bad in (("0" * 40, P), (head, "not-a-uuid")):
         expect(f"build refuses {bad[0][:6]}/{bad[1][:6]}", "accepted", "refused")
     except SystemExit:
         expect(f"build refuses {bad[0][:6]}/{bad[1][:6]}", "refused", "refused")
+# verify(): exact environment, exact secret reference, execution evidence.
+import copy
+import datetime as dt
+now = dt.datetime(2026, 11, 14, 12, 0, tzinfo=dt.timezone.utc)
+SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+deployed = {**copy.deepcopy(d), "updated_at": "2026-11-14T10:00:00Z"}
+ref = [{"secret_manager_id": SID, "env_var": {"name": "SCW_SECRET_KEY"}}]
+env0 = d["environment_variables"]
+canary_run = {"state": "succeeded", "exit_code": 0, "created_at": "2026-11-14T10:05:00Z", "environment_variables": {**env0, "REAPER_FLAGS": "--canary"}}
+sched_run = {"state": "succeeded", "exit_code": 0, "created_at": "2026-11-14T11:53:00Z", "environment_variables": dict(env0)}
+dry_run = {"state": "succeeded", "exit_code": 0, "created_at": "2026-11-14T11:40:00Z", "environment_variables": {**env0, "REAPER_FLAGS": "--dry-run"}}
+ok_runs = [sched_run, dry_run, canary_run]
+
+
+def armed(defn=deployed, refs=ref, runs=ok_runs):
+    problems, _ = job.check(defn, refs, runs, head, SID, now=now)
+    return problems
+
+
+expect("complete, exact deployment is ARMED", armed(), [])
+for k, v in (("REAPER_FLAGS", "--dry-run"), ("SCW_API_URL", "https://attacker.example"), ("EXTRA", "x")):
+    bad = copy.deepcopy(deployed); bad["environment_variables"][k] = v
+    expect(f"extra env {k} is NOT ARMED", any("environment differs" in p for p in armed(defn=bad)), True)
+bad = copy.deepcopy(deployed); bad["environment_variables"]["REAPER_PART_0"] = tampered
+expect("changed code part is NOT ARMED", any("environment differs" in p for p in armed(defn=bad)), True)
+bad = copy.deepcopy(deployed); bad["cron_schedule"] = None
+expect("missing cron is NOT ARMED", any("cron" in p for p in armed(defn=bad)), True)
+expect("no secret reference is NOT ARMED", any("secret references" in p for p in armed(refs=[])), True)
+expect("secret as file is NOT ARMED", any("secret references" in p for p in armed(refs=[{"secret_manager_id": SID, "file": {"path": "/k"}}])), True)
+expect("other secret is NOT ARMED", any("secret references" in p for p in armed(refs=[{"secret_manager_id": "other", "env_var": {"name": "SCW_SECRET_KEY"}}])), True)
+expect("two secret references are NOT ARMED", any("secret references" in p for p in armed(refs=ref * 2)), True)
+expect("never executed is NOT ARMED", len(armed(runs=[])) >= 2, True)
+failed = [{**r, "state": "failed", "exit_code": 1} for r in ok_runs]
+expect("only failed runs is NOT ARMED", any("canary" in p for p in armed(runs=failed)), True)
+expect("dry run alone is not deletion evidence", any("canary" in p for p in armed(runs=[dry_run, sched_run])), True)
+old = {**sched_run, "created_at": "2026-11-14T11:00:00Z"}
+expect("stale scheduled run is NOT ARMED", any("30 minutes" in p for p in armed(runs=[old, canary_run])), True)
+before = {**canary_run, "created_at": "2026-11-14T09:00:00Z"}
+expect("canary of a previous definition is NOT ARMED", any("canary" in p for p in armed(runs=[sched_run, before])), True)
+foreign = {**sched_run, "environment_variables": {**env0, "SCW_API_URL": "https://attacker.example"}}
+expect("run with a foreign environment is NOT ARMED", any("non-pinned" in p for p in armed(runs=ok_runs + [foreign])), True)
 api.shutdown()
 print(f"failures: {fails}")
 sys.exit(1 if fails else 0)

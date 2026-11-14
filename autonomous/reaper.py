@@ -25,7 +25,12 @@ Any failure is reported with ::error:: and exit status 1, never hidden:
 access denied (401/403), connection failure, timeout (SCW_TIMEOUT seconds,
 default 30), an incomplete listing, or a failed deletion.
 
-  reaper.py --project-id <uuid> [--dry-run] [--zone fr-par-2] [--max-age-min 300]
+  reaper.py --project-id <uuid> [--dry-run | --canary] [--zone fr-par-2] [--max-age-min 300]
+
+--canary proves the key can actually delete: it creates an unattached
+flexible IP tagged sila-s8 and sila-s8-canary in the project, deletes it and
+checks it is gone (404). Cost: one started hour of a flexible IP. If its own
+deletion fails, the next normal run releases it (unattached, tagged sila-s8).
 """
 import argparse
 import datetime as dt
@@ -37,6 +42,11 @@ import urllib.error
 import urllib.request
 
 API = os.environ.get("SCW_API_URL", "https://api.scaleway.com")
+# Only the real API, or a local mock in tests: an injected SCW_API_URL must
+# never redirect the deletion key to another host.
+if API != "https://api.scaleway.com" and not API.startswith("http://127.0.0.1:"):
+    print(f"::error::refusing SCW_API_URL {API!r}")
+    sys.exit(1)
 TIMEOUT = float(os.environ.get("SCW_TIMEOUT", "30"))
 PREFIX = "sila-s8-"
 TAG = "sila-s8"
@@ -48,8 +58,12 @@ class ReaperError(Exception):
         self.code = code
 
 
-def call(method, path, key):
-    req = urllib.request.Request(API + path, method=method, headers={"X-Auth-Token": key})
+def call(method, path, key, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"X-Auth-Token": key}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(API + path, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             body = r.read()
@@ -106,6 +120,25 @@ def decide(server, now, max_age, project):
     return None
 
 
+def canary(zone, project, key):
+    f = call("POST", f"/flexible-ip/v1alpha1/zones/{zone}/fips",
+             key, {"project_id": project, "tags": [TAG, "sila-s8-canary"], "description": "SILA S-8 reaper canary"})
+    fid = f.get("id")
+    if not fid:
+        raise ReaperError("canary: create returned no id")
+    print(f"  canary flexible IP {fid} created")
+    call("DELETE", f"/flexible-ip/v1alpha1/zones/{zone}/fips/{fid}", key)
+    try:
+        call("GET", f"/flexible-ip/v1alpha1/zones/{zone}/fips/{fid}", key)
+        state = "still present"
+    except ReaperError as e:
+        state = "gone" if e.code == 404 else str(e)
+    if state != "gone":
+        raise ReaperError(f"canary: flexible IP {fid} {state} after deletion")
+    print("CANARY OK: the key can create and delete Elastic Metal resources in the project")
+    return 0
+
+
 def main(argv=None):
     try:
         return _main(argv)
@@ -116,7 +149,9 @@ def main(argv=None):
 
 def _main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--canary", action="store_true")
     ap.add_argument("--zone", default="fr-par-2")
     ap.add_argument("--max-age-min", type=int, default=300)
     ap.add_argument("--project-id", default=os.environ.get("SCW_PROJECT_ID", ""))
@@ -128,6 +163,8 @@ def _main(argv=None):
     if not key:
         print("::error::SCW_SECRET_KEY is not set; the reaper cannot protect against billing")
         return 1
+    if a.canary:
+        return canary(a.zone, a.project_id, key)
     now = dt.datetime.now(dt.timezone.utc)
     max_age = dt.timedelta(minutes=a.max_age_min)
     failures = 0

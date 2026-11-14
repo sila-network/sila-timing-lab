@@ -7,8 +7,9 @@ operator session.
 
   scw_job.py build  <lab commit> <project id>    # print the job definition (JSON)
   scw_job.py create <lab commit> <project id>    # create it (setup identity)
-  scw_job.py verify <job definition id> <lab commit>
-  scw_job.py test-run <job definition id>        # one run with --dry-run
+  scw_job.py verify <job definition id> <lab commit> <secret manager id>
+  scw_job.py test-run <job definition id>        # one run with --dry-run (not evidence)
+  scw_job.py canary-run <job definition id>      # one run with --canary (evidence)
 
 Design (least privilege, separated identities):
   * The job runs a pinned, multi-arch python:3.13-alpine image (by digest).
@@ -107,29 +108,67 @@ def call(method, path, body=None):
         raise SystemExit(f"{method} {path}: HTTP {e.code} {e.read()[:300]!r}")
 
 
-def verify(job_id, lab_sha):
-    d = call("GET", f"/serverless-jobs/v1alpha2/regions/{REGION}/job-definitions/{job_id}")
+ALLOWED_RUN_FLAGS = {"": "scheduled", "--canary": "canary", "--dry-run": "dry-run"}
+
+
+def classify_run(run, want_env):
+    """'scheduled', 'canary' or 'dry-run' if the run used exactly the pinned
+    environment (plus at most REAPER_FLAGS), else 'foreign'."""
+    env = run.get("environment_variables") or {}
+    for k, v in env.items():
+        if k == "REAPER_FLAGS":
+            continue
+        if want_env.get(k) != v:
+            return "foreign"
+    return ALLOWED_RUN_FLAGS.get(env.get("REAPER_FLAGS", ""), "foreign")
+
+
+def check(d, secrets, runs, lab_sha, secret_id, now=None):
+    """Returns the list of problems; empty means ARMED."""
+    import datetime as dt
+    now = now or dt.datetime.now(dt.timezone.utc)
     want = build(lab_sha, d.get("project_id", ""))
     problems = []
-    for k in ("image_uri", "startup_command", "args", "job_timeout"):
+    for k in ("name", "image_uri", "startup_command", "args", "job_timeout", "cpu_limit", "memory_limit"):
         if d.get(k) != want[k]:
-            problems.append(f"{k} differs")
+            problems.append(f"{k} differs from the lab commit")
     env = d.get("environment_variables") or {}
-    for k, v in want["environment_variables"].items():
-        if env.get(k) != v:
-            problems.append(f"env {k} differs")
+    if env != want["environment_variables"]:
+        extra = sorted(set(env) - set(want["environment_variables"]))
+        changed = sorted(k for k in want["environment_variables"] if env.get(k) != want["environment_variables"][k])
+        problems.append(f"environment differs (unexpected: {extra}, missing/changed: {changed})")
     cron = d.get("cron_schedule") or {}
-    if cron.get("schedule") != SCHEDULE:
+    if cron.get("schedule") != SCHEDULE or cron.get("timezone") != "UTC":
         problems.append("cron schedule missing or different")
-    secrets = call("GET", f"/serverless-jobs/v1alpha2/regions/{REGION}/secrets?job_definition_id={job_id}").get("secrets", [])
-    if not any(s.get("env_var_name") == "SCW_SECRET_KEY" for s in secrets):
-        problems.append("no secret reference exposed as SCW_SECRET_KEY")
-    runs = call("GET", f"/serverless-jobs/v1alpha2/regions/{REGION}/job-runs?job_definition_id={job_id}&order_by=created_at_desc&page_size=5").get("job_runs", [])
-    print(json.dumps({"job": job_id, "cron": cron, "secret_refs": len(secrets),
-                      "recent_runs": [(r.get("created_at"), r.get("state"), r.get("exit_code")) for r in runs]}, indent=1))
+    refs = [(s.get("secret_manager_id"), (s.get("env_var") or {}).get("name"), bool(s.get("file"))) for s in secrets]
+    if refs != [(secret_id, "SCW_SECRET_KEY", False)]:
+        problems.append(f"secret references must be exactly one env var SCW_SECRET_KEY from {secret_id}, found {refs}")
+    since = d.get("updated_at") or d.get("created_at") or ""
+    current = [r for r in runs if (r.get("created_at") or "") >= since]
+    ok = lambda r: r.get("state") == "succeeded" and r.get("exit_code") in (0, None) and not r.get("error_message")
+    kinds = [(classify_run(r, want["environment_variables"]), ok(r), r.get("created_at")) for r in current]
+    if any(k == "foreign" for k, _, _ in kinds):
+        problems.append("a run used a non-pinned environment")
+    if not any(k == "canary" and good for k, good, _ in kinds):
+        problems.append("no successful canary run of the current definition (deletion permission unproven)")
+    recent = [c for k, good, c in kinds if k == "scheduled" and good and c and
+              now - dt.datetime.fromisoformat(c.replace("Z", "+00:00")) <= dt.timedelta(minutes=30)]
+    if not recent:
+        problems.append("no successful scheduled run of the current definition in the last 30 minutes")
+    return problems, kinds
+
+
+def verify(job_id, lab_sha, secret_id):
+    base = f"/serverless-jobs/v1alpha2/regions/{REGION}"
+    d = call("GET", f"{base}/job-definitions/{job_id}")
+    secrets = call("GET", f"{base}/secrets?job_definition_id={job_id}").get("secrets", [])
+    runs = call("GET", f"{base}/job-runs?job_definition_id={job_id}&order_by=created_at_desc&page_size=50").get("job_runs", [])
+    problems, kinds = check(d, secrets, runs, lab_sha, secret_id)
+    print(json.dumps({"job": job_id, "runs_of_current_definition": kinds}, indent=1))
     if problems:
-        raise SystemExit("NOT ARMED: " + "; ".join(problems))
-    print("ARMED: definition matches the lab commit, cron set, deletion key referenced")
+        raise SystemExit("NOT ARMED:\n - " + "\n - ".join(problems))
+    print("ARMED: definition and environment match the lab commit exactly, one secret reference, "
+          "canary proved deletion, scheduled runs succeed")
 
 
 def main(argv):
@@ -142,10 +181,11 @@ def main(argv):
         d = call("POST", f"/serverless-jobs/v1alpha2/regions/{REGION}/job-definitions", build(argv[2], argv[3]))
         print(d.get("id"))
     elif cmd == "verify":
-        verify(argv[2], argv[3])
-    elif cmd == "test-run":
+        verify(argv[2], argv[3], argv[4])
+    elif cmd in ("test-run", "canary-run"):
+        flag = "--dry-run" if cmd == "test-run" else "--canary"
         d = call("POST", f"/serverless-jobs/v1alpha2/regions/{REGION}/job-definitions/{argv[2]}/start",
-                 {"environment_variables": {"REAPER_FLAGS": "--dry-run"}})
+                 {"environment_variables": {"REAPER_FLAGS": flag}})
         print(json.dumps(d, indent=1)[:2000])
     else:
         raise SystemExit(__doc__)
