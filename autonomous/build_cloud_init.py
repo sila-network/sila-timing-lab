@@ -5,9 +5,10 @@
 
   build_cloud_init.py <collector public key, base64> <lab commit SHA>
 
-The output embeds run.sh, serve.py and ../scripts/check_evidence.sh from
-this commit (base64), the collector's Ed25519 PUBLIC key and the lab commit
-for the record. It contains no token, password or private key. The server
+The embedded run.sh, serve.py, endpoint.sh and scripts/check_evidence.sh are
+read from the given lab commit itself (git objects, never the worktree),
+after checking that the commit exists, so lab.txt names exactly the code
+that runs. The output also carries the collector's Ed25519 PUBLIC key. It contains no token, password or private key. The server
 needs no login: SSH is turned off, the firewall admits only 80/443 (Caddy,
 Let's Encrypt for <ip>.sslip.io), and the result endpoint answers only
 requests signed with the collector's private key.
@@ -15,13 +16,19 @@ requests signed with the collector's private key.
 import base64
 import os
 import re
+import subprocess
 import sys
 
 here = os.path.dirname(os.path.abspath(__file__))
 
 
-def b64(path):
-    return base64.b64encode(open(os.path.join(here, path), "rb").read()).decode()
+def git(*args):
+    return subprocess.run(["git", "-C", here, *args], check=True, capture_output=True).stdout
+
+
+def b64(lab_sha, path):
+    # The file as stored in the lab commit, not as found in the worktree.
+    return base64.b64encode(git("show", f"{lab_sha}:{path}")).decode()
 
 
 def build(pubkey, lab_sha):
@@ -29,11 +36,16 @@ def build(pubkey, lab_sha):
         raise SystemExit("public key must be 32 bytes (Ed25519), base64")
     if not re.fullmatch(r"[0-9a-f]{40}", lab_sha):
         raise SystemExit("lab commit must be a 40-hex SHA")
+    try:
+        if git("rev-parse", "--verify", "--quiet", f"{lab_sha}^{{commit}}").decode().strip() != lab_sha:
+            raise SystemExit(f"{lab_sha} is not a commit of this repository")
+    except subprocess.CalledProcessError:
+        raise SystemExit(f"{lab_sha} is not a commit of this repository")
     files = {
-        "/opt/sila-s8/run.sh": ("0755", b64("run.sh")),
-        "/opt/sila-s8/serve.py": ("0755", b64("serve.py")),
-        "/opt/sila-s8/check_evidence.sh": ("0755", b64("../scripts/check_evidence.sh")),
-        "/opt/sila-s8/endpoint.sh": ("0755", b64("endpoint.sh")),
+        "/opt/sila-s8/run.sh": ("0755", b64(lab_sha, "autonomous/run.sh")),
+        "/opt/sila-s8/serve.py": ("0755", b64(lab_sha, "autonomous/serve.py")),
+        "/opt/sila-s8/check_evidence.sh": ("0755", b64(lab_sha, "scripts/check_evidence.sh")),
+        "/opt/sila-s8/endpoint.sh": ("0755", b64(lab_sha, "autonomous/endpoint.sh")),
     }
     out = [
         "#cloud-config",
@@ -82,6 +94,9 @@ def build(pubkey, lab_sha):
         "      [Service]",
         "      Type=oneshot",
         "      ExecStart=/bin/bash /opt/sila-s8/run.sh",
+        "      # Hard bound: run.sh limits each step (measurement 5 h); this stops",
+        "      # anything else that hangs. Deletion is enforced by the operator.",
+        "      TimeoutStartSec=6h",
         "      [Install]",
         "      WantedBy=multi-user.target",
         "  - path: /etc/systemd/system/sila-s8-serve.service",

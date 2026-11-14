@@ -53,6 +53,16 @@ How it works:
   answers only fresh GET requests signed with the collector's **private**
   key, which never leaves the operator's machine. Anything else gets
   403 or 404.
+- **Deadlines:**
+  - On the server: the downloads and the source fetch are bounded, the
+    measurement is limited to 5 h (exit 124, never counted), and the
+    systemd unit to 6 h.
+  - On the operator side: the server is deleted through the API as soon as
+    results are collected, or at creation + 6 h at the latest, whatever
+    the outcome. Reminders are set at creation.
+- **Provenance:** `build_cloud_init.py` takes the embedded scripts from the
+  given lab commit's git objects, never from the worktree, so `lab.txt`
+  names exactly the code that runs.
 - **Collection:** `collect.py` fetches the files over HTTPS and verifies
   `SHA256SUMS`. The operator stores them under `results/` (author SILA
   Network) and deletes the server through the API.

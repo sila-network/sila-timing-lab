@@ -46,7 +46,7 @@ echo "preflight: ok" >>"$OUT/machine.txt"
 phase go
 cd "$BASE" || fail "no $BASE"
 file=$GO_VERSION.linux-amd64.tar.gz
-curl -fsSL -o "$file" "https://go.dev/dl/$file" || fail "Go download failed"
+curl -fsSL --max-time 900 -o "$file" "https://go.dev/dl/$file" || fail "Go download failed"
 [ "$(sha256sum "$file" | cut -d' ' -f1)" = "$GO_SHA256" ] || fail "Go archive checksum mismatch"
 rm -rf go && tar -xzf "$file" && rm -f "$file"
 export PATH=$BASE/go/bin:$PATH HOME=/root GOCACHE=/var/cache/sila-s8-go GOPATH=/var/cache/sila-s8-gopath
@@ -55,18 +55,20 @@ export GOTOOLCHAIN=local GOFLAGS=-mod=readonly
 phase source
 src=$BASE/sila-core-primitives
 rm -rf "$src" && git init -q "$src" && cd "$src" || fail "git init"
-git fetch -q --depth 1 "$SILA_REPO" "$SILA_SHA" || fail "fetch of $SILA_SHA failed"
+timeout 900 git fetch -q --depth 1 "$SILA_REPO" "$SILA_SHA" || fail "fetch of $SILA_SHA failed"
 git -c advice.detachedHead=false checkout -q FETCH_HEAD || fail "checkout failed"
 [ "$(git rev-parse HEAD)" = "$SILA_SHA" ] || fail "wrong commit"
 [ -z "$(git status --porcelain)" ] || fail "working tree not clean"
 go version >"$OUT/go.txt"
-go list -f '{{join .GoFiles " "}}' ./secp256k1 | tr ' ' '\n' | grep '^dit_' >>"$OUT/go.txt"
+timeout 900 go list -f '{{join .GoFiles " "}}' ./secp256k1 | tr ' ' '\n' | grep '^dit_' >>"$OUT/go.txt"
 grep -qx dit_go124.go "$OUT/go.txt" || fail "DIT wrapper not compiled in"
 
 phase measuring
 echo "command: ./scripts/timing_dedicated.sh 1000000 10 $CPU (as root, autonomous cloud-init)" >"$OUT/command.txt"
-./scripts/timing_dedicated.sh 1000000 10 "$CPU" >"$OUT/timing.txt" 2>&1
+# Bounded: a stalled run ends with exit status 124 and never counts.
+timeout --kill-after=60 5h ./scripts/timing_dedicated.sh 1000000 10 "$CPU" >"$OUT/timing.txt" 2>&1
 status=$?
+[ "$status" = 124 ] && echo "TIMEOUT: measurement exceeded 5 h" >>"$OUT/timing.txt"
 echo "exit status: $status" >>"$OUT/timing.txt"
 
 phase evaluating

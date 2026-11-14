@@ -98,8 +98,17 @@ jobs:
           assert "policy drop" in files["/etc/nftables.conf"]["content"], "default drop"
           assert "ConditionKernelCommandLine=isolcpus=2" in files["/etc/systemd/system/sila-s8-measure.service"]["content"]
           assert "127.0.0.1" in base64.b64decode(files["/opt/sila-s8/serve.py"]["content"]).decode()
+          assert "TimeoutStartSec=6h" in files["/etc/systemd/system/sila-s8-measure.service"]["content"]
+          assert "timeout --kill-after=60 5h ./scripts/timing_dedicated.sh" in base64.b64decode(files["/opt/sila-s8/run.sh"]["content"]).decode()
           print("cloud-init ok")
           PY
+          # Provenance: a modified worktree is never embedded; an unknown commit is refused.
+          echo "# local change" >> run.sh
+          python3 -I build_cloud_init.py "$key" "$(git rev-parse HEAD)" > "$RUNNER_TEMP/ci2.yaml"
+          python3 -c "import yaml,base64,sys; d=yaml.safe_load(open(sys.argv[1])); f={x['path']:x for x in d['write_files']}; assert b'local change' not in base64.b64decode(f['/opt/sila-s8/run.sh']['content'])" "$RUNNER_TEMP/ci2.yaml"
+          git checkout -- run.sh
+          if python3 -I build_cloud_init.py "$key" 0000000000000000000000000000000000000000 >/dev/null 2>&1; then echo "::error::unknown lab commit accepted"; exit 1; fi
+          echo "provenance ok"
       - name: Autonomous run rejects a virtual machine (this runner) and never counts it
         run: |
           t=$(mktemp -d); mkdir -p "$t/home"; cp scripts/check_evidence.sh "$t/home/"; echo "lab commit: selftest" > "$t/home/lab.txt"
