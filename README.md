@@ -25,6 +25,38 @@ runners registered only here, never on the public SILA repository.
 | `runner/register.sh` | Registers this machine as an ephemeral runner (one job, then it deregisters itself). The runner package is checksum-verified. The token is read hidden, never logged. |
 | `runner/cloud-init-amd64.yaml` | Elastic Metal x86-64. Isolates core 2, turns SMT and automatic updates off, installs `register.sh` and reboots. It contains **no token or other secret**. |
 
+## Autonomous x86-64 server (no runner, no login, no secret)
+
+`autonomous/` runs the same measurement on an Elastic Metal server driven
+only through the Scaleway API. Nobody logs in to the server, and no GitHub
+runner or token is involved.
+
+How it works:
+- **Build:** `build_cloud_init.py <collector public key> <lab commit>`
+  writes the cloud-init. It embeds `run.sh`, `serve.py`, `endpoint.sh` and
+  `scripts/check_evidence.sh` from this commit, plus the collector's
+  Ed25519 **public** key. It contains no token, password or private key.
+- **First boot:**
+  - SSH is turned off.
+  - The firewall drops everything except 80/443.
+  - Caddy obtains a Let's Encrypt certificate for `<ip>.sslip.io`.
+  - Core 2 is isolated, SMT is turned off, then the server reboots.
+- **Second boot:** `run.sh` runs once. It only starts if the isolation is
+  active, and performs, with unchanged criteria:
+  1. the preflight (rejects VMs);
+  2. Go 1.25.14, checksum-verified;
+  3. SILA at `75939d5`, exact SHA and clean tree;
+  4. `scripts/timing_dedicated.sh 1000000 10 2`;
+  5. `check_evidence.sh`;
+  6. `SHA256SUMS` over the results.
+- **Results:** `serve.py` listens on localhost only and is read-only. It
+  answers only fresh GET requests signed with the collector's **private**
+  key, which never leaves the operator's machine. Anything else gets
+  403 or 404.
+- **Collection:** `collect.py` fetches the files over HTTPS and verifies
+  `SHA256SUMS`. The operator stores them under `results/` (author SILA
+  Network) and deletes the server through the API.
+
 ## Security model
 
 - The repository is **public**, so its stored results are public. They
