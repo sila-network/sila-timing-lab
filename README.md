@@ -79,12 +79,21 @@ How it works:
     secret `SCW_REAPER_SECRET_KEY` and the variable `SCW_PROJECT_ID`.
     GitHub can delay or drop scheduled runs, so this guard alone is not a
     guarantee.
-  - **Guard 2, operator platform:** a one-shot task scheduled at server
-    creation for creation + 5 h 30 min. It starts a **fresh session**, so
-    it does not depend on the provisioning session or on GitHub's
-    scheduler, and it runs `reaper.py` with the environment's
-    proxy-injected Scaleway key. It is armed, read back and verified
-    before any paid server is created.
+  - **Guard 2, Scaleway Serverless Jobs** (`autonomous/scw_job.py`):
+    Scaleway's own scheduler runs the same pinned `reaper.py` every
+    10 minutes (minutes 3, 13, …, 53 UTC). It is independent of GitHub and
+    of any operator session.
+    - **Image:** `python:3.13-alpine`, pinned by digest.
+    - **Code:** taken from the lab commit's git objects, embedded in
+      environment variables, and checked against `REAPER_SHA256` before it
+      runs. Nothing is downloaded at run time.
+    - **Limits:** each run is bounded to 300 s and retried once.
+    - **Deletion key:** reaches the job only as a Secret Manager reference
+      exposed as `SCW_SECRET_KEY`. Scaleway resolves it at start, so the
+      job itself needs no Secret Manager permission.
+    - **Armed check:** `scw_job.py verify` must report `ARMED` before a paid
+      server is created. It checks the definition against the lab commit,
+      the cron schedule, the secret reference and recent runs.
   - **Ordering:** servers are created with the name `sila-s8-<machine>`,
     the tags `sila-s8` and `sila-s8-delete-after=<creation + 5 h>`, and
     only after both guards are verified.
@@ -94,6 +103,23 @@ How it works:
 - **Collection:** `collect.py` fetches the files over HTTPS and verifies
   `SHA256SUMS`. The operator stores them under `results/` (author SILA
   Network) and deletes the server through the API.
+
+## Scaleway identities (least privilege, all scoped to project SILA-S8-Security-Testing)
+
+| Identity | Permission sets | Used by | Lifetime |
+|---|---|---|---|
+| `sila-s8-amd64-automation` (existing) | ElasticMetalReadOnly | operator: availability, status, deletion checks | unchanged |
+| `sila-s8-reaper-runtime` (new) | ElasticMetalFullAccess (Scaleway has no narrower set that can delete) | its key exists **only** in Secret Manager; read by guard 2 (and the GitHub secret, if guard 1 is enabled) | the S-8 test window; revoked afterwards |
+| `sila-s8-reaper-setup` (new, temporary) | ServerlessJobsFullAccess | operator: create, verify and test-run the job definition; it never sees the deletion key | revoked, or reduced to ServerlessJobsReadOnly, once guard 2 is verified |
+
+The owner creates the Secret Manager secret holding the runtime key and the
+job's secret reference in the console. The deletion key therefore never
+passes through the operator session, a repository or a log.
+
+Cost of guard 2 (public catalogue, fr-par, excl. VAT):
+- **Per run:** 0.14 vCPU × ~20 s × €0.00001 + 0.25 GB × ~20 s × €0.000002
+  + one secret access at €0.000003, which is about €0.00004.
+- **Per day:** 144 runs, which is about €0.006.
 
 ## Security model
 
