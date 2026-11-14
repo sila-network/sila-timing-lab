@@ -89,9 +89,10 @@ SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 deployed = {**copy.deepcopy(d), "updated_at": "2026-11-14T10:00:00Z"}
 ref = [{"secret_manager_id": SID, "env_var": {"name": "SCW_SECRET_KEY"}}]
 env0 = d["environment_variables"]
-canary_run = {"state": "succeeded", "exit_code": 0, "created_at": "2026-11-14T10:05:00Z", "environment_variables": {**env0, "REAPER_FLAGS": "--canary"}}
-sched_run = {"state": "succeeded", "exit_code": 0, "created_at": "2026-11-14T11:53:00Z", "environment_variables": dict(env0)}
-dry_run = {"state": "succeeded", "exit_code": 0, "created_at": "2026-11-14T11:40:00Z", "environment_variables": {**env0, "REAPER_FLAGS": "--dry-run"}}
+boot_fields = {"startup_command": d["startup_command"], "args": d["args"]}
+canary_run = {**boot_fields, "state": "succeeded", "exit_code": 0, "created_at": "2026-11-14T10:05:00Z", "environment_variables": {**env0, "REAPER_FLAGS": "--canary"}}
+sched_run = {**boot_fields, "state": "succeeded", "exit_code": 0, "created_at": "2026-11-14T11:53:00Z", "environment_variables": dict(env0)}
+dry_run = {**boot_fields, "state": "succeeded", "exit_code": 0, "created_at": "2026-11-14T11:40:00Z", "environment_variables": {**env0, "REAPER_FLAGS": "--dry-run"}}
 ok_runs = [sched_run, dry_run, canary_run]
 
 
@@ -122,6 +123,14 @@ before = {**canary_run, "created_at": "2026-11-14T09:00:00Z"}
 expect("canary of a previous definition is NOT ARMED", any("canary" in p for p in armed(runs=[sched_run, before])), True)
 foreign = {**sched_run, "environment_variables": {**env0, "SCW_API_URL": "https://attacker.example"}}
 expect("run with a foreign environment is NOT ARMED", any("non-pinned" in p for p in armed(runs=ok_runs + [foreign])), True)
+noop = [{**r, "args": ["-c", "exit 0"]} for r in (sched_run, canary_run)]
+expect("no-op args overriding the boot are NOT ARMED (Codex P1)", any("non-pinned" in p for p in armed(runs=noop)), True)
+other_cmd = [{**r, "startup_command": ["/bin/true"]} for r in (sched_run, canary_run)]
+expect("overridden startup command is NOT ARMED", any("non-pinned" in p for p in armed(runs=other_cmd)), True)
+legacy = [{**r, "command": "true"} for r in (sched_run, canary_run)]
+expect("deprecated command override is NOT ARMED", any("non-pinned" in p for p in armed(runs=legacy)), True)
+hidden = [{k: v for k, v in r.items() if k not in ("startup_command", "args")} for r in (sched_run, canary_run)]
+expect("run records without command/args are never evidence", any("canary" in p for p in armed(runs=hidden)), True)
 api.shutdown()
 print(f"failures: {fails}")
 sys.exit(1 if fails else 0)

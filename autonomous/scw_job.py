@@ -111,9 +111,14 @@ def call(method, path, body=None):
 ALLOWED_RUN_FLAGS = {"": "scheduled", "--canary": "canary", "--dry-run": "dry-run"}
 
 
-def classify_run(run, want_env):
-    """'scheduled', 'canary' or 'dry-run' if the run used exactly the pinned
-    environment (plus at most REAPER_FLAGS), else 'foreign'."""
+def classify_run(run, want):
+    """'scheduled', 'canary' or 'dry-run' if the run executed exactly the
+    pinned boot (startup command, arguments, no deprecated command) with the
+    pinned environment (plus at most REAPER_FLAGS), else 'foreign'. A run
+    record that does not expose its command and arguments is never evidence."""
+    if run.get("startup_command") != want["startup_command"] or run.get("args") != want["args"] or run.get("command"):
+        return "foreign"
+    want_env = want["environment_variables"]
     env = run.get("environment_variables") or {}
     for k, v in env.items():
         if k == "REAPER_FLAGS":
@@ -146,9 +151,9 @@ def check(d, secrets, runs, lab_sha, secret_id, now=None):
     since = d.get("updated_at") or d.get("created_at") or ""
     current = [r for r in runs if (r.get("created_at") or "") >= since]
     ok = lambda r: r.get("state") == "succeeded" and r.get("exit_code") in (0, None) and not r.get("error_message")
-    kinds = [(classify_run(r, want["environment_variables"]), ok(r), r.get("created_at")) for r in current]
+    kinds = [(classify_run(r, want), ok(r), r.get("created_at")) for r in current]
     if any(k == "foreign" for k, _, _ in kinds):
-        problems.append("a run used a non-pinned environment")
+        problems.append("a run used a non-pinned command, arguments or environment")
     if not any(k == "canary" and good for k, good, _ in kinds):
         problems.append("no successful canary run of the current definition (deletion permission unproven)")
     recent = [c for k, good, c in kinds if k == "scheduled" and good and c and
