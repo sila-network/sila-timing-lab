@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Ahmed Ibrahim
+#
+# Billing guard for the autonomous S-8 server, independent of any operator
+# session: every 10 minutes, delete sila-s8-* Elastic Metal servers that are
+# 5 h old or older, errored, or past their sila-s8-delete-after tag.
+# The Scaleway key (secret SCW_REAPER_SECRET_KEY, scoped to the
+# SILA-S8-Security-Testing project) is never printed.
+name: S-8 billing guard (reaper)
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List only, delete nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s8-reaper
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    if: github.repository == 'sila-network/sila-timing-lab'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete expired S-8 servers
+        env:
+          SCW_SECRET_KEY: ${{ secrets.SCW_REAPER_SECRET_KEY }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
+        run: python3 -I autonomous/reaper.py $DRY_RUN --zone fr-par-2 --max-age-min 300

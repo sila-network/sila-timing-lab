@@ -109,6 +109,13 @@ jobs:
           git checkout -- run.sh
           if python3 -I build_cloud_init.py "$key" 0000000000000000000000000000000000000000 >/dev/null 2>&1; then echo "::error::unknown lab commit accepted"; exit 1; fi
           echo "provenance ok"
+      - name: Billing guard (reaper) logic
+        run: |
+          python3 -m py_compile autonomous/reaper.py
+          python3 -I autonomous/test_reaper.py
+          grep -q 'cron: "\*/10 \* \* \* \*"' .github/workflows/s8-reaper.yml
+          grep -q -- '--max-age-min 300' .github/workflows/s8-reaper.yml
+          echo "reaper ok"
       - name: Autonomous run rejects a virtual machine (this runner) and never counts it
         run: |
           t=$(mktemp -d); mkdir -p "$t/home"; cp scripts/check_evidence.sh "$t/home/"; echo "lab commit: selftest" > "$t/home/lab.txt"

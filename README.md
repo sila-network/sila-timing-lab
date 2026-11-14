@@ -60,6 +60,19 @@ How it works:
   - On the operator side: the server is deleted through the API as soon as
     results are collected, or at creation + 6 h at the latest, whatever
     the outcome. Reminders are set at creation.
+- **Billing guard, independent of the operator's session:**
+  - `.github/workflows/s8-reaper.yml` runs `autonomous/reaper.py` every
+    10 minutes on GitHub. It deletes every `sila-s8-*` Elastic Metal
+    server that is ≥ 5 h old, errored, or past its
+    `sila-s8-delete-after=<unix time>` tag, and releases unattached
+    flexible IPs tagged `sila-s8`. Other servers are never touched.
+  - The key is the Actions secret `SCW_REAPER_SECRET_KEY`, scoped to the
+    SILA-S8-Security-Testing project. It is never printed. Without it,
+    every run fails visibly.
+  - Servers are created with the name prefix `sila-s8-` and a
+    `sila-s8-delete-after` tag set to creation + 5 h.
+  - The operator also deletes the server as soon as results are
+    collected, and checks deletion through the API.
 - **Provenance:** `build_cloud_init.py` takes the embedded scripts from the
   given lab commit's git objects, never from the worktree, so `lab.txt`
   names exactly the code that runs.
