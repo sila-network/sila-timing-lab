@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Ahmed Ibrahim
+#
+# Self-test of the lab tooling on a GitHub-hosted runner. It measures
+# nothing and never counts for S-8; it checks that the scripts parse and
+# that the evidence check rejects every failed or incomplete result.
+name: Lab self-test
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Script syntax
+        run: |
+          bash -n runner/register.sh scripts/check_evidence.sh scripts/test_check_evidence.sh
+          python3 -c "import yaml; [yaml.safe_load(open(f)) for f in ('runner/cloud-init-amd64.yaml', '.github/workflows/s8-timing.yml')]"
+      - name: cloud-init embeds the current register.sh and no secret
+        run: |
+          python3 - <<'PY'
+          import base64, yaml
+          d = yaml.safe_load(open('runner/cloud-init-amd64.yaml'))
+          emb = [f for f in d['write_files'] if f['path'] == '/opt/sila-s8/register.sh'][0]
+          assert base64.b64decode(emb['content']) == open('runner/register.sh', 'rb').read(), 'stale embedded register.sh'
+          text = open('runner/cloud-init-amd64.yaml').read().lower()
+          assert 'token' not in yaml.dump([f for f in d['write_files'] if f['path'] != '/opt/sila-s8/register.sh']).lower()
+          print('cloud-init ok')
+          PY
+      - name: Registered runner labels satisfy the timing job
+        run: |
+          # The job needs self-hosted + sila-s8 + the machine label; the
+          # runner keeps its default labels (incl. self-hosted) and adds ours.
+          grep -q 'runs-on: \[self-hosted, sila-s8, ' .github/workflows/s8-timing.yml
+          # (no "! grep": a negated command never fails a "bash -e" step)
+          if grep -q -- '--no-default-labels' runner/register.sh; then echo "::error::--no-default-labels drops self-hosted"; exit 1; fi
+          grep -q -- '--labels "sila-s8,$label"' runner/register.sh
+          echo "labels ok"
+      - name: Timing workflow guards
+        run: |
+          w=.github/workflows/s8-timing.yml
+          grep -q "github.ref == 'refs/heads/main'" $w              # main branch only
+          grep -q "github.event_name == 'workflow_dispatch'" $w     # manual only
+          if grep -nE '^\s+(push|pull_request|pull_request_target|schedule):' $w; then echo "::error::automatic trigger"; exit 1; fi
+          if grep -nE '(checkout|fetch).*\|\| *true|\"\$GITHUB_SHA\" *\|\|' $w; then echo "::error::ignored checkout/fetch failure"; exit 1; fi
+          grep -q '\[ "\$head" = "\$GITHUB_SHA" \]' $w            # exact dispatched commit
+          grep -q 'SILA_COMMIT_EMAIL is not set; set it before starting' $w
+          if grep -n 'pull .*--rebase' $w; then echo "::error::shallow rebase in the result step"; exit 1; fi
+          grep -q 'git -C "$dest" config user.email "$COMMIT_EMAIL"' $w   # identity in the result clone
+          if grep -rni 'private repository' $w runner README.md; then echo "::error::stale 'private' wording"; exit 1; fi
+          echo "guards ok"
+      - name: macOS bash >= 4.4 is ensured before registration
+        run: |
+          r=runner/register.sh; w=.github/workflows/s8-timing.yml
+          for c in /opt/homebrew/bin/bash /usr/local/bin/bash /opt/local/bin/bash; do
+            grep -q "$c" $r || { echo "::error::register.sh does not look for $c"; exit 1; }
+            grep -q "$c" $w || { echo "::error::preflight does not look for $c"; exit 1; }
+          done
+          # The bash check comes before the token prompt (registration).
+          [ "$(grep -n 'bash >= 4.4 is required' $r | cut -d: -f1)" -lt "$(grep -n 'Paste the runner registration token' $r | cut -d: -f1)" ]
+          echo "macOS bash ok"
+      - name: Evidence check accepts only complete passing runs
+        run: bash scripts/test_check_evidence.sh

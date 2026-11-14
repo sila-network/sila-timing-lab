@@ -1,0 +1,253 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Ahmed Ibrahim
+#
+# S-8 dedicated-hardware timing for SILA secp256k1 (Issue #4 of
+# sila-network/sila-core-primitives). Manual start only. Runs on a
+# temporary, single-job (ephemeral) self-hosted runner registered to this
+# public repository; never on GitHub-hosted runners. Only the main branch
+# may be dispatched (job guard below).
+name: S-8 dedicated timing
+
+on:
+  workflow_dispatch:
+    inputs:
+      machine:
+        description: Target machine (runner label)
+        required: true
+        type: choice
+        options: [arm64-mac, amd64-baremetal]
+      mode:
+        description: "full = 1,000,000 x 10 (counts for S-8); preflight = checks + 3,000 x 1 trial (does not count)"
+        required: true
+        type: choice
+        default: full
+        options: [full, preflight]
+
+permissions:
+  contents: write # only to store the raw results in this repository (public)
+
+concurrency:
+  group: s8-${{ inputs.machine }}
+  cancel-in-progress: false
+
+env:
+  SILA_REPO: https://github.com/sila-network/sila-core-primitives.git
+  SILA_SHA: 75939d59602318e8eb3561b150cf0944035a03b5
+  GO_VERSION: go1.25.14
+  GO_SHA256_darwin_arm64: 5b26c0b6f308240fca2614fb02f622cfcc8c0cc3b69c78bba4845489a4590259
+  GO_SHA256_linux_amd64: a21ae5633a269bcd7e90cf767e48225633795e99d831742cbf3397064fee7712
+  MACHINE: ${{ inputs.machine }}
+  MODE: ${{ inputs.mode }}
+  CPU: "2"
+
+jobs:
+  timing:
+    name: S-8 ${{ inputs.mode }} on ${{ inputs.machine }}
+    # Public repository: only a manual dispatch of the main branch in this
+    # repository itself (never a fork, a pull request or another branch)
+    # may reach the self-hosted runner.
+    if: >-
+      github.repository == 'sila-network/sila-timing-lab' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, sila-s8, "${{ inputs.machine }}"]
+    timeout-minutes: 720
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Results can be stored (fail before any measurement)
+        env:
+          COMMIT_EMAIL: ${{ vars.SILA_COMMIT_EMAIL }}
+        run: |
+          # Without this variable the result commit would fail after the
+          # measurement and the evidence would survive only in the job log.
+          if [ -z "$COMMIT_EMAIL" ]; then
+            echo "::error::Repository variable SILA_COMMIT_EMAIL is not set; set it before starting a measurement."
+            exit 1
+          fi
+
+      - name: Lab scripts at the dispatched commit (verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          rm -rf "$GITHUB_WORKSPACE" && git init -q "$GITHUB_WORKSPACE" && cd "$GITHUB_WORKSPACE"
+          # Fetch exactly the dispatched commit; any failure stops the job,
+          # so no script from an unverified commit can run.
+          git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch -q --depth 1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -c advice.detachedHead=false checkout -q FETCH_HEAD
+          head=$(git rev-parse HEAD)
+          [ "$head" = "$GITHUB_SHA" ] || { echo "::error::lab checkout $head is not the dispatched commit $GITHUB_SHA"; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "::error::lab checkout not clean"; exit 1; }
+          echo "lab scripts: $GITHUB_REPOSITORY@$head ($GITHUB_REF)"
+          out="$RUNNER_TEMP/s8-$MACHINE-$(date -u +%Y%m%dT%H%M%SZ)-run$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$out"
+          echo "lab commit: $head" > "$out/lab.txt"
+          echo "OUT=$out" >> "$GITHUB_ENV"
+
+      - name: Preflight (real hardware, CPU, DIT, isolation)
+        run: |
+          set -euo pipefail
+          {
+            echo "machine label: $MACHINE"
+            echo "date (UTC): $(date -u +%FT%TZ)"
+            uname -a
+            case "$(uname -s)" in
+            Darwin)
+              echo "cpu: $(sysctl -n machdep.cpu.brand_string)"
+              echo "hw.model: $(sysctl -n hw.model)"
+              echo "FEAT_DIT: $(sysctl -n hw.optional.arm.FEAT_DIT 2>/dev/null || echo unknown)"
+              echo "kern.hv_vmm_present: $(sysctl -n kern.hv_vmm_present 2>/dev/null || echo unknown)"
+              echo "ncpu: $(sysctl -n hw.ncpu) (perf cores: $(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo ?))"
+              sw_vers
+              pmset -g 2>/dev/null | grep -E 'sleep|lowpowermode|powernap' || true
+              ;;
+            Linux)
+              lscpu
+              echo "virtualization (systemd-detect-virt): $(systemd-detect-virt 2>/dev/null || true)"
+              echo "isolated CPUs: $(cat /sys/devices/system/cpu/isolated 2>/dev/null || echo unknown)"
+              echo "SMT: $(cat /sys/devices/system/cpu/smt/control 2>/dev/null || echo unknown)"
+              echo "kernel cmdline: $(cat /proc/cmdline)"
+              echo "sudo without password: $(sudo -n true 2>/dev/null && echo yes || echo no)"
+              ;;
+            esac
+          } | tee "$OUT/machine.txt"
+
+          fail() { echo "PREFLIGHT FAILED: $*" | tee -a "$OUT/machine.txt"; exit 1; }
+          case "$MACHINE" in
+          arm64-mac)
+            [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] || fail "not macOS on arm64"
+            [ "$(sysctl -n hw.optional.arm.FEAT_DIT 2>/dev/null)" = 1 ] || fail "FEAT_DIT not available"
+            [ "$(sysctl -n kern.hv_vmm_present 2>/dev/null)" = 0 ] || fail "running inside a virtual machine"
+            sysctl -n machdep.cpu.brand_string | grep -q '^Apple M' || fail "not an Apple M-series CPU"
+            # bash >= 4.4 for scripts/timing_dedicated.sh (see the run step).
+            nb=""
+            for c in /opt/homebrew/bin/bash /usr/local/bin/bash /opt/local/bin/bash; do
+              [ -x "$c" ] && "$c" -c '[ "${BASH_VERSINFO[0]}${BASH_VERSINFO[1]}" -ge 44 ]' && nb=$c && break
+            done
+            if [ -z "$nb" ] && command -v brew >/dev/null; then
+              HOMEBREW_NO_AUTO_UPDATE=1 brew install --quiet bash >/dev/null && nb="$(brew --prefix)/bin/bash"
+            fi
+            [ -n "$nb" ] || fail "bash >= 4.4 not available (register.sh installs it with Homebrew or MacPorts)"
+            echo "bash for the script: $nb ($("$nb" -c 'echo $BASH_VERSION'))" | tee -a "$OUT/machine.txt"
+            echo "SILA_BASH=$nb" >> "$GITHUB_ENV"
+            ;;
+          amd64-baremetal)
+            [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ] || fail "not Linux on x86-64"
+            [ "$(systemd-detect-virt 2>/dev/null || true)" = none ] || fail "virtualization detected"
+            sudo -n true 2>/dev/null || fail "passwordless sudo needed for the governor and turbo settings"
+            grep -qw "$CPU" <(tr ',' '\n' < /sys/devices/system/cpu/isolated) ||
+              echo "WARNING: CPU $CPU is not isolated (isolcpus); the noise controls decide whether the run counts" | tee -a "$OUT/machine.txt"
+            ;;
+          esac
+          echo "preflight: ok" | tee -a "$OUT/machine.txt"
+
+      - name: Go ${{ env.GO_VERSION }} (checksum-verified, job-local)
+        run: |
+          set -euo pipefail
+          os=$(uname -s | tr '[:upper:]' '[:lower:]')
+          case "$(uname -m)" in x86_64) arch=amd64 ;; arm64|aarch64) arch=arm64 ;; esac
+          var="GO_SHA256_${os}_${arch}"
+          want="${!var}"
+          file="$GO_VERSION.$os-$arch.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$file" "https://go.dev/dl/$file"
+          got=$( (sha256sum "$RUNNER_TEMP/$file" 2>/dev/null || shasum -a 256 "$RUNNER_TEMP/$file") | cut -d' ' -f1)
+          [ "$got" = "$want" ] || { echo "Go archive checksum mismatch: $got"; exit 1; }
+          rm -rf "$RUNNER_TEMP/go" && tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/$file"
+          echo "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
+          echo "GOCACHE=$RUNNER_TEMP/gocache" >> "$GITHUB_ENV"
+          echo "GOPATH=$RUNNER_TEMP/gopath" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+          echo "GOFLAGS=-mod=readonly" >> "$GITHUB_ENV"
+
+      - name: SILA at the approved commit (unmodified)
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/sila-core-primitives"
+          rm -rf "$src" && git init -q "$src" && cd "$src"
+          git fetch -q --depth 1 "$SILA_REPO" "$SILA_SHA"
+          git -c advice.detachedHead=false checkout -q FETCH_HEAD
+          [ "$(git rev-parse HEAD)" = "$SILA_SHA" ] || { echo "wrong commit"; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "working tree not clean"; exit 1; }
+          go version | tee "$OUT/go.txt"
+          # Sign and PublicKey enable DIT through crypto/subtle only when the
+          # Go >= 1.24 file is compiled in.
+          go list -f '{{join .GoFiles " "}}' ./secp256k1 | tr ' ' '\n' | grep '^dit_' | tee -a "$OUT/go.txt"
+          grep -qx dit_go124.go "$OUT/go.txt" || { echo "DIT wrapper not compiled in"; exit 1; }
+          echo "SRC=$src" >> "$GITHUB_ENV"
+
+      - name: Timing measurement (${{ inputs.mode }})
+        run: |
+          set -uo pipefail
+          cd "$SRC"
+          if [ "$MODE" = full ]; then args=(1000000 10 "$CPU"); else args=(3000 1 "$CPU"); fi
+          case "$(uname -s)" in
+          Linux)
+            # Root for the governor/turbo settings; keep the job's Go, caches
+            # and let root's git read the runner-owned checkout.
+            run=(sudo -n env "PATH=$PATH" "GOCACHE=$GOCACHE-root" "GOPATH=$GOPATH-root" "GOTOOLCHAIN=local" "HOME=$RUNNER_TEMP"
+                 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory "GIT_CONFIG_VALUE_0=$SRC"
+                 ./scripts/timing_dedicated.sh "${args[@]}") ;;
+          Darwin)
+            # The script's macOS branch changes no system setting, so root is
+            # not needed there; caffeinate keeps the machine awake. macOS
+            # /bin/bash is 3.2, whose "set -u" rejects the script's empty
+            # PIN array (fixed in bash 4.4), so the script runs under the
+            # bash >= 4.4 found by the preflight step.
+            run=(caffeinate -dimsu "$SILA_BASH" ./scripts/timing_dedicated.sh "${args[@]}") ;;
+          esac
+          echo "command: ${run[*]}" > "$OUT/command.txt"
+          "${run[@]}" 2>&1 | tee "$OUT/timing.txt"
+          status=${PIPESTATUS[0]}
+          echo "exit status: $status" | tee -a "$OUT/timing.txt"
+          echo "TIMING_STATUS=$status" >> "$GITHUB_ENV"
+
+      - name: Evaluate against the S-8 criteria
+        run: bash "$GITHUB_WORKSPACE/scripts/check_evidence.sh" "$OUT" "$MACHINE" "$MODE" "$SILA_SHA"
+
+      - name: Store the raw results in this repository
+        if: always() && env.OUT != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_EMAIL: ${{ vars.SILA_COMMIT_EMAIL }}
+        run: |
+          set -euo pipefail
+          # Every raw file also goes to the job log first, so the evidence
+          # survives even if the commit below fails.
+          for f in "$OUT"/*; do echo "===== $(basename "$f")"; cat "$f"; done
+          [ -n "$COMMIT_EMAIL" ] || { echo "::error::SILA_COMMIT_EMAIL is not set; results are in the job log above only"; exit 1; }
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          # Each attempt starts from a fresh shallow clone of the newest main,
+          # so a result commit stored meanwhile by the other machine is never
+          # rebased or merged; the identity is set in the clone itself.
+          for i in 1 2 3; do
+            dest="$RUNNER_TEMP/lab-store-$i"
+            rm -rf "$dest"
+            git -c "http.extraheader=AUTHORIZATION: basic $auth" clone -q --depth 1 --branch main \
+              "https://github.com/$GITHUB_REPOSITORY.git" "$dest"
+            git -C "$dest" config user.name "SILA Network"
+            git -C "$dest" config user.email "$COMMIT_EMAIL"
+            mkdir -p "$dest/results/$MACHINE"
+            cp -R "$OUT" "$dest/results/$MACHINE/"
+            git -C "$dest" add results
+            git -C "$dest" commit -q -m "S-8 $MODE results: $MACHINE, run $GITHUB_RUN_ID (SILA $SILA_SHA)"
+            if git -C "$dest" -c "http.extraheader=AUTHORIZATION: basic $auth" push -q origin HEAD:main; then
+              echo "stored: results/$MACHINE/$(basename "$OUT") ($(git -C "$dest" rev-parse HEAD))"
+              exit 0
+            fi
+            echo "push attempt $i rejected; retrying from the newest main"
+            sleep $((i * 5))
+          done
+          echo "::error::could not push the results; they are in the job log above"
+          exit 1
+
+      - name: Remove job-local files
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/go" "$RUNNER_TEMP/gocache" "$RUNNER_TEMP/gopath" "$RUNNER_TEMP"/go1.*.tar.gz
+          if [ "$(uname -s)" = Linux ]; then sudo -n rm -rf "$RUNNER_TEMP/gocache-root" "$RUNNER_TEMP/gopath-root" || true; fi
