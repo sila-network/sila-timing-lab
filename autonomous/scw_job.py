@@ -59,7 +59,11 @@ def git(*args):
 def reaper_at(lab_sha):
     if not re.fullmatch(r"[0-9a-f]{40}", lab_sha):
         raise SystemExit("lab commit must be a 40-hex SHA")
-    if git("rev-parse", "--verify", "--quiet", f"{lab_sha}^{{commit}}").decode().strip() != lab_sha:
+    try:
+        ok = git("rev-parse", "--verify", "--quiet", f"{lab_sha}^{{commit}}").decode().strip() == lab_sha
+    except subprocess.CalledProcessError:
+        ok = False
+    if not ok:
         raise SystemExit(f"{lab_sha} is not a commit of this repository")
     return git("show", f"{lab_sha}:autonomous/reaper.py")
 
