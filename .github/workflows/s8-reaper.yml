@@ -2,15 +2,18 @@
 # Copyright 2026 Ahmed Ibrahim
 #
 # Billing guard for the autonomous S-8 server, independent of any operator
-# session: every 10 minutes, delete sila-s8-* Elastic Metal servers that are
-# 5 h old or older, errored, or past their sila-s8-delete-after tag.
+# session: every 10 minutes (at minute 7, 17, ..., away from the busy top of
+# the hour), delete Elastic Metal servers of the S-8 project (vars.SCW_PROJECT_ID)
+# named sila-s8-* AND tagged sila-s8 that are 5 h old or older, errored, or
+# past their sila-s8-delete-after tag. GitHub schedules can be delayed or
+# dropped: this is one of two independent guards (see README).
 # The Scaleway key (secret SCW_REAPER_SECRET_KEY, scoped to the
 # SILA-S8-Security-Testing project) is never printed.
 name: S-8 billing guard (reaper)
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "7-59/10 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -35,5 +38,6 @@ jobs:
       - name: Delete expired S-8 servers
         env:
           SCW_SECRET_KEY: ${{ secrets.SCW_REAPER_SECRET_KEY }}
+          SCW_PROJECT_ID: ${{ vars.SCW_PROJECT_ID }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
         run: python3 -I autonomous/reaper.py $DRY_RUN --zone fr-par-2 --max-age-min 300

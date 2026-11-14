@@ -113,7 +113,8 @@ jobs:
         run: |
           python3 -m py_compile autonomous/reaper.py
           python3 -I autonomous/test_reaper.py
-          grep -q 'cron: "\*/10 \* \* \* \*"' .github/workflows/s8-reaper.yml
+          grep -q 'cron: "7-59/10 \* \* \* \*"' .github/workflows/s8-reaper.yml
+          grep -q 'SCW_PROJECT_ID: ${{ vars.SCW_PROJECT_ID }}' .github/workflows/s8-reaper.yml
           grep -q -- '--max-age-min 300' .github/workflows/s8-reaper.yml
           echo "reaper ok"
       - name: Autonomous run rejects a virtual machine (this runner) and never counts it

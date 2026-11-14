@@ -60,19 +60,34 @@ How it works:
   - On the operator side: the server is deleted through the API as soon as
     results are collected, or at creation + 6 h at the latest, whatever
     the outcome. Reminders are set at creation.
-- **Billing guard, independent of the operator's session:**
-  - `.github/workflows/s8-reaper.yml` runs `autonomous/reaper.py` every
-    10 minutes on GitHub. It deletes every `sila-s8-*` Elastic Metal
-    server that is ≥ 5 h old, errored, or past its
-    `sila-s8-delete-after=<unix time>` tag, and releases unattached
-    flexible IPs tagged `sila-s8`. Other servers are never touched.
-  - The key is the Actions secret `SCW_REAPER_SECRET_KEY`, scoped to the
-    SILA-S8-Security-Testing project. It is never printed. Without it,
-    every run fails visibly.
-  - Servers are created with the name prefix `sila-s8-` and a
-    `sila-s8-delete-after` tag set to creation + 5 h.
-  - The operator also deletes the server as soon as results are
-    collected, and checks deletion through the API.
+- **Billing guard.** Two deletion mechanisms, independent of each other and
+  of the operator's session. Both use `autonomous/reaper.py`.
+  - **Selection:** a server is deleted only if all three hold:
+    - its `project_id` is the S-8 project (the listing is filtered by
+      project, and each item is checked again);
+    - its name starts with `sila-s8-`;
+    - it carries the tag `sila-s8`.
+  - **Deletion triggers:** a selected server is deleted when it is ≥ 5 h
+    old, errored, or past its `sila-s8-delete-after=<unix time>` tag.
+    Unattached flexible IPs of the project tagged `sila-s8` are released.
+  - **Failures:** every listing is paginated to `total_count`. Access
+    denied, connection failure, timeout, an incomplete listing or a failed
+    deletion exit 1 with `::error::`. A 404 on deletion (already removed by
+    the other guard) counts as success.
+  - **Guard 1, GitHub:** `.github/workflows/s8-reaper.yml` runs at minutes
+    7, 17, …, 57, away from the busy top of the hour. Its inputs are the
+    secret `SCW_REAPER_SECRET_KEY` and the variable `SCW_PROJECT_ID`.
+    GitHub can delay or drop scheduled runs, so this guard alone is not a
+    guarantee.
+  - **Guard 2, operator platform:** a one-shot task scheduled at server
+    creation for creation + 5 h 30 min. It starts a **fresh session**, so
+    it does not depend on the provisioning session or on GitHub's
+    scheduler, and it runs `reaper.py` with the environment's
+    proxy-injected Scaleway key. It is armed, read back and verified
+    before any paid server is created.
+  - **Ordering:** servers are created with the name `sila-s8-<machine>`,
+    the tags `sila-s8` and `sila-s8-delete-after=<creation + 5 h>`, and
+    only after both guards are verified.
 - **Provenance:** `build_cloud_init.py` takes the embedded scripts from the
   given lab commit's git objects, never from the worktree, so `lab.txt`
   names exactly the code that runs.
