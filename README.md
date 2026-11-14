@@ -91,9 +91,28 @@ How it works:
     - **Deletion key:** reaches the job only as a Secret Manager reference
       exposed as `SCW_SECRET_KEY`. Scaleway resolves it at start, so the
       job itself needs no Secret Manager permission.
-    - **Armed check:** `scw_job.py verify` must report `ARMED` before a paid
-      server is created. It checks the definition against the lab commit,
-      the cron schedule, the secret reference and recent runs.
+    - **Armed check:** `scw_job.py verify <job> <lab commit> <secret id>`
+      must report `ARMED` before a paid server is created. It requires all
+      of the following:
+      - definition, image and arguments equal to the lab commit;
+      - the environment **exactly** equal to the pinned one, so no extra
+        variable such as `REAPER_FLAGS` or `SCW_API_URL` is allowed;
+      - exactly one secret reference, the given secret exposed as
+        `SCW_SECRET_KEY`;
+      - a cron at minutes 3/13/…/53 UTC;
+      - a **successful canary run** of the current definition (see below);
+      - a **successful scheduled run** within the last 30 minutes.
+
+      Dry-run test runs are never counted as evidence, and a run with a
+      non-pinned environment makes `verify` fail.
+    - **Canary** (`scw_job.py canary-run`): proves the runtime key can
+      really delete. It creates an unattached flexible IP tagged `sila-s8`
+      and `sila-s8-canary` in the project, deletes it, and confirms a 404.
+      It costs one started hour of a flexible IP, a few euro cents at most,
+      and needs the owner's approval like any spending.
+    - **API host:** `reaper.py` refuses any `SCW_API_URL` other than
+      `https://api.scaleway.com`, apart from a local mock in tests, so the
+      deletion key cannot be sent to another host.
   - **Ordering:** servers are created with the name `sila-s8-<machine>`,
     the tags `sila-s8` and `sila-s8-delete-after=<creation + 5 h>`, and
     only after both guards are verified.
