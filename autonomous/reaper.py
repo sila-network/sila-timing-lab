@@ -37,6 +37,24 @@ def call(method, path, key):
         return json.loads(body) if body else {}
 
 
+def list_all(path, field, key):
+    """Every item of a paginated Scaleway list; fails if the pages do not add
+    up to total_count, so a truncated view can never pass as complete."""
+    items, page = [], 1
+    while True:
+        sep = "&" if "?" in path else "?"
+        d = call("GET", f"{path}{sep}page={page}&page_size=100", key)
+        batch = d.get(field, [])
+        items += batch
+        total = d.get("total_count", len(items))
+        if not batch or len(items) >= total:
+            break
+        page += 1
+    if len(items) < total:
+        raise RuntimeError(f"listed {len(items)} of {total} {field}")
+    return items
+
+
 def parse_time(s):
     return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
 
@@ -73,7 +91,7 @@ def main(argv=None):
     now = dt.datetime.now(dt.timezone.utc)
     max_age = dt.timedelta(minutes=a.max_age_min)
     failures = 0
-    servers = call("GET", f"/baremetal/v1/zones/{a.zone}/servers?page_size=100", key).get("servers", [])
+    servers = list_all(f"/baremetal/v1/zones/{a.zone}/servers", "servers", key)
     print(f"{now:%Y-%m-%dT%H:%M:%SZ} zone {a.zone}: {len(servers)} server(s) visible")
     for s in servers:
         reason = decide(s, now, max_age)
@@ -86,7 +104,7 @@ def main(argv=None):
             except urllib.error.HTTPError as e:
                 print(f"::error::delete {s['id']} failed: HTTP {e.code}")
                 failures += 1
-    fips = call("GET", f"/flexible-ip/v1alpha1/zones/{a.zone}/fips?page_size=100", key).get("flexible_ips", [])
+    fips = list_all(f"/flexible-ip/v1alpha1/zones/{a.zone}/fips", "flexible_ips", key)
     for f in fips:
         if "sila-s8" in (f.get("tags") or []) and not f.get("server_id"):
             print(f"  flexible IP {f['id']} unattached, tagged sila-s8 -> " + ("release (dry run)" if a.dry_run else "release"))
@@ -100,4 +118,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:  # any API or listing failure must fail the run visibly
+        print(f"::error::reaper failed: {type(e).__name__}: {e}")
+        sys.exit(1)
