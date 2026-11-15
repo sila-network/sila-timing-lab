@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Ahmed Ibrahim
+#
+# Billing guard for an S-8 server on Vultr bare metal, independent of any
+# operator session: every 10 minutes (minutes 5, 15, ..., 55, away from the
+# busy top of the hour) delete Vultr bare-metal servers labelled sila-s8-*
+# AND tagged sila-s8 that are 5 h old or older, not active/pending, or past
+# their sila-s8-delete-after tag. The key (secret VULTR_REAPER_API_KEY) is
+# never printed. GitHub-hosted runners use changing IP addresses, so this
+# guard only works if the Vultr API Access Control admits them.
+name: S-8 billing guard (Vultr reaper)
+
+on:
+  schedule:
+    - cron: "5-59/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List only, delete nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s8-vultr-reaper
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    if: github.repository == 'sila-network/sila-timing-lab'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete expired S-8 Vultr servers
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_REAPER_API_KEY }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
+        run: python3 -I autonomous/vultr_reaper.py $DRY_RUN --max-age-min 300
