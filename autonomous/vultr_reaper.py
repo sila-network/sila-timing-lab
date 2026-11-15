@@ -19,9 +19,15 @@ access denied (401/403, including a refused source IP), connection failure,
 timeout (VULTR_TIMEOUT seconds, default 30), an incomplete listing, or a
 failed deletion. A 404 on deletion (already removed) is not a failure.
 
-  vultr_reaper.py [--dry-run] [--max-age-min 300]
+  vultr_reaper.py [--dry-run | --canary] [--max-age-min 300]
+
+--canary proves that this key, from this source address, can really
+delete: it creates a free startup script named "sila-s8-canary-<time>",
+deletes it and confirms the API then answers 404. Nothing billable is
+created, and no server is touched.
 """
 import argparse
+import base64
 import datetime as dt
 import json
 import os
@@ -45,8 +51,12 @@ class ReaperError(Exception):
         self.code = code
 
 
-def call(method, path, key):
-    req = urllib.request.Request(API + path, method=method, headers={"Authorization": f"Bearer {key}"})
+def call(method, path, key, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Authorization": f"Bearer {key}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(API + path, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             body = r.read()
@@ -98,9 +108,31 @@ def decide(s, now, max_age):
     return None
 
 
+def canary(key, now):
+    name = f"{PREFIX}canary-{int(now.timestamp())}"
+    script = base64.b64encode(b"#!/bin/sh\n# SILA S-8 deletion canary; never run\nexit 0\n").decode()
+    sid = call("POST", "/startup-scripts", key, {"name": name, "type": "boot", "script": script})
+    sid = (sid.get("startup_script") or {}).get("id")
+    if not sid:
+        raise ReaperError("canary: create returned no id")
+    print(f"  canary {sid} {name!r} created")
+    call("DELETE", f"/startup-scripts/{sid}", key)
+    print(f"  canary {sid} deleted")
+    try:
+        call("GET", f"/startup-scripts/{sid}", key)
+    except ReaperError as e:
+        if e.code == 404:
+            print("  canary confirmed gone (404): this key can delete from this address")
+            return 0
+        raise
+    raise ReaperError(f"canary {sid} still exists after deletion")
+
+
 def _main(argv):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--canary", action="store_true")
     ap.add_argument("--max-age-min", type=int, default=300)
     a = ap.parse_args(argv)
     key = os.environ.get("VULTR_API_KEY", "")
@@ -108,6 +140,9 @@ def _main(argv):
         print("::error::VULTR_API_KEY is not set; the reaper cannot protect against billing")
         return 1
     now = dt.datetime.now(dt.timezone.utc)
+    if a.canary:
+        print(f"{now:%Y-%m-%dT%H:%M:%SZ} vultr: deletion canary")
+        return canary(key, now)
     servers = list_bare_metals(key)
     print(f"{now:%Y-%m-%dT%H:%M:%SZ} vultr: {len(servers)} bare-metal server(s) visible")
     failures = 0

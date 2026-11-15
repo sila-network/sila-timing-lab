@@ -29,7 +29,8 @@ base = [bm("sila-s8-old", 5 * H + dt.timedelta(minutes=1)), bm("sila-s8-young", 
         bm("sila-s8-deadline", dt.timedelta(minutes=20), ("sila-s8", f"sila-s8-delete-after={int(now.timestamp()) - 1}")),
         bm("sila-s8-stuck", dt.timedelta(minutes=10), status="locked"),
         bm("sila-s8-notag", 40 * H, tags=()), bm("prod-db", 900 * H, tags=())]
-st = {"filler": [], "total": None, "deny": False, "fail": set(), "gone": set(), "sleep": 0}
+st = {"filler": [], "total": None, "deny": False, "fail": set(), "gone": set(), "sleep": 0,
+      "scripts": {}, "script_survives": False, "script_delete_denied": False}
 deleted = []
 
 
@@ -50,6 +51,9 @@ class API(http.server.BaseHTTPRequestHandler):
             return self.send(401, {"error": "Invalid API token."})
         if st["deny"]:
             return self.send(401, {"error": "Unauthorized IP address: 1.2.3.4"})
+        if self.path.startswith("/startup-scripts/"):
+            sid = self.path.rsplit("/", 1)[1]
+            return self.send(200, {"startup_script": st["scripts"][sid]}) if sid in st["scripts"] else self.send(404, {"error": "not found"})
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         items = st["filler"] + base
         start = int(q.get("cursor", ["0"])[0])
@@ -57,8 +61,24 @@ class API(http.server.BaseHTTPRequestHandler):
         nxt = str(start + 100) if start + 100 < len(items) else ""
         self.send(200, {"bare_metals": page, "meta": {"total": st["total"] or len(items), "links": {"next": nxt, "prev": ""}}})
 
+    def do_POST(self):
+        if self.headers.get("Authorization") != "Bearer k" or st["deny"]:
+            return self.send(401, {"error": "Unauthorized IP address: 1.2.3.4"})
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path != "/startup-scripts" or not body.get("name", "").startswith("sila-s8-canary-"):
+            return self.send(400, {"error": "unexpected request"})
+        sid = f"script-{len(st['scripts']) + 1}"
+        st["scripts"][sid] = body
+        self.send(201, {"startup_script": {"id": sid, **body}})
+
     def do_DELETE(self):
         rid = self.path.rsplit("/", 1)[1]
+        if self.path.startswith("/startup-scripts/"):
+            if st["script_delete_denied"]:
+                return self.send(401, {"error": "Unauthorized IP address: 1.2.3.4"})
+            if not st["script_survives"]:
+                st["scripts"].pop(rid, None)
+            return self.send(204)
         if rid in st["fail"]:
             return self.send(403, {"error": "forbidden"})
         if rid in st["gone"]:
@@ -126,6 +146,18 @@ st["sleep"] = 4
 rc, out, took = run()
 expect("timeout fails visibly and promptly", (rc, "timed out" in out, took < 10), (1, True, True))
 st["sleep"] = 0
+rc, out, _ = run("--canary")
+expect("canary: create, delete, confirm 404; no server touched", (rc, "confirmed gone (404)" in out, deleted, st["scripts"]), (0, True, [], {}))
+st["script_delete_denied"] = True
+rc, out, _ = run("--canary")
+expect("canary: refused delete fails visibly", (rc, "access denied 401" in out), (1, True))
+st["script_delete_denied"] = False; st["scripts"].clear(); st["script_survives"] = True
+rc, out, _ = run("--canary")
+expect("canary: script surviving deletion fails visibly", (rc, "still exists" in out), (1, True))
+st["script_survives"] = False; st["scripts"].clear(); st["deny"] = True
+rc, out, _ = run("--canary")
+expect("canary: refused source IP fails visibly", (rc, "access denied 401" in out), (1, True))
+st["deny"] = False
 os.environ["VULTR_API_KEY"] = ""
 rc, out, _ = run()
 expect("missing key fails loudly", (rc, "VULTR_API_KEY is not set" in out), (1, True))
