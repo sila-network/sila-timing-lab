@@ -27,8 +27,8 @@ deletes it and confirms the API then answers 404. Nothing billable is
 created, and no server is touched. It needs permission to create and
 delete startup scripts.
 
---probe-delete, for a key limited to listing and deleting bare-metal
-servers: before reaping, it sends DELETE for the all-zero server id, which
+--probe-delete (implied by every real run and by --canary): before
+reaping, it sends DELETE for the all-zero server id, which
 cannot exist, and requires 404 (authorised, no such server). 401/403 (key
 or source address refused, or no delete permission) fails visibly.
 """
@@ -162,9 +162,15 @@ def _main(argv):
         return 1
     now = dt.datetime.now(dt.timezone.utc)
     if a.canary:
+        # Startup-script and bare-metal deletion are separate IAM permissions
+        # (compute.script.Delete, compute.baremetal.Delete): the canary alone
+        # never proves the second, so the probe always runs too.
         print(f"{now:%Y-%m-%dT%H:%M:%SZ} vultr: deletion canary")
-        return canary(key, now)
-    if a.probe_delete:
+        canary(key, now)
+        probe_delete(key)
+        return 0
+    if a.probe_delete or not a.dry_run:
+        # Every real run proves the bare-metal delete permission first.
         probe_delete(key)
     servers = list_bare_metals(key)
     print(f"{now:%Y-%m-%dT%H:%M:%SZ} vultr: {len(servers)} bare-metal server(s) visible")

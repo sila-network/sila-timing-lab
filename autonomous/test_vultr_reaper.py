@@ -172,7 +172,18 @@ expect("delete probe: 403 fails visibly before reaping", (rc, "delete probe fail
 st["probe"] = "accept"
 rc, out, _ = run("--probe-delete")
 expect("delete probe: accepted deletion of a non-existent server fails", (rc, "non-existent" in out), (1, True))
+st["probe"] = "deny"
+rc, out, _ = run("--canary", "--probe-delete")
+expect("canary + probe: bare-metal delete refused fails even if scripts can be deleted", (rc, "delete probe failed" in out), (1, True))
+rc, out, _ = run("--canary")
+expect("canary alone also probes bare-metal delete", (rc, "delete probe failed" in out), (1, True))
+rc, out, _ = run()
+expect("a real run probes before reaping: refused probe deletes nothing", (rc, "delete probe failed" in out, deleted), (1, True, []))
+rc, out, _ = run("--dry-run")
+expect("a dry run without --probe-delete does not probe", (rc, "delete probe" in out), (0, False))
 st["probe"] = "ok"
+rc, out, _ = run("--canary")
+expect("canary: script and bare-metal deletion both proven", (rc, "confirmed gone (404)" in out and "authorised" in out), (0, True))
 os.environ["VULTR_API_KEY"] = ""
 rc, out, _ = run()
 expect("missing key fails loudly", (rc, "VULTR_API_KEY is not set" in out), (1, True))

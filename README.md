@@ -330,10 +330,12 @@ these scripts: the operator session's network proxy injects it.
 | Deletion guard 2 | Claude scheduled task, fresh session per run | hourly, minute 47 | as above |
 | Independent guard | `.github/workflows/s8-vultr-reaper.yml` | every 10 min | IAM service user limited to `compute.baremetal.List/Read/Delete`; its own allowlist |
 
-Every guard run proves that it can really delete: the Claude tasks run
-`--canary` (a free startup script is created, deleted and confirmed 404);
-the GitHub guard runs `--probe-delete` (DELETE of a non-existent server must
-answer 404). Each guard deletes `sila-s8-*` servers tagged `sila-s8` at 5 h
+Every guard run proves that it can really delete a bare-metal server
+before reaping: DELETE of a non-existent server must answer 404, not
+401/403 (`--probe-delete`, implied by every real run). The Claude tasks
+also run `--canary` (a free startup script is created, deleted and
+confirmed 404). Startup-script and bare-metal deletion are separate IAM
+permissions, so the canary never replaces the probe. Each guard deletes `sila-s8-*` servers tagged `sila-s8` at 5 h
 or after their `sila-s8-delete-after` tag, so the worst case is 6 h:
 6 × $0.41 = $2.46 before tax. `vultr_provision.py create` refuses to run
 without the owner's approved `PLAN@REGION@MAXUSD`, above the $10 budget, or
