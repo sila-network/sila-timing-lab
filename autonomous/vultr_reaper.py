@@ -19,12 +19,18 @@ access denied (401/403, including a refused source IP), connection failure,
 timeout (VULTR_TIMEOUT seconds, default 30), an incomplete listing, or a
 failed deletion. A 404 on deletion (already removed) is not a failure.
 
-  vultr_reaper.py [--dry-run | --canary] [--max-age-min 300]
+  vultr_reaper.py [--dry-run | --canary] [--probe-delete] [--max-age-min 300]
 
 --canary proves that this key, from this source address, can really
 delete: it creates a free startup script named "sila-s8-canary-<time>",
 deletes it and confirms the API then answers 404. Nothing billable is
-created, and no server is touched.
+created, and no server is touched. It needs permission to create and
+delete startup scripts.
+
+--probe-delete, for a key limited to listing and deleting bare-metal
+servers: before reaping, it sends DELETE for the all-zero server id, which
+cannot exist, and requires 404 (authorised, no such server). 401/403 (key
+or source address refused, or no delete permission) fails visibly.
 """
 import argparse
 import base64
@@ -128,11 +134,26 @@ def canary(key, now):
     raise ReaperError(f"canary {sid} still exists after deletion")
 
 
+PROBE_ID = "00000000-0000-0000-0000-000000000000"
+
+
+def probe_delete(key):
+    try:
+        call("DELETE", f"/bare-metals/{PROBE_ID}", key)
+    except ReaperError as e:
+        if e.code == 404:
+            print("  delete probe: authorised (404 for a non-existent server)")
+            return
+        raise ReaperError(f"delete probe failed: {e}") from None
+    raise ReaperError("delete probe: the API accepted deletion of a non-existent server")
+
+
 def _main(argv):
     ap = argparse.ArgumentParser()
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--canary", action="store_true")
+    ap.add_argument("--probe-delete", action="store_true")
     ap.add_argument("--max-age-min", type=int, default=300)
     a = ap.parse_args(argv)
     key = os.environ.get("VULTR_API_KEY", "")
@@ -143,6 +164,8 @@ def _main(argv):
     if a.canary:
         print(f"{now:%Y-%m-%dT%H:%M:%SZ} vultr: deletion canary")
         return canary(key, now)
+    if a.probe_delete:
+        probe_delete(key)
     servers = list_bare_metals(key)
     print(f"{now:%Y-%m-%dT%H:%M:%SZ} vultr: {len(servers)} bare-metal server(s) visible")
     failures = 0

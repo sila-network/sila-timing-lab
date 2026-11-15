@@ -316,3 +316,25 @@ It is given through the session's secure credential form for
 `api.scaleway.com`, header `X-Auth-Token`, and never in chat or in this
 repository. Claude still creates nothing without the owner's approval of
 the price.
+
+## Vultr x86-64 run (AMD EPYC 4245P, `vbm-6c-32gb-amd`)
+
+The server is created by `autonomous/vultr_provision.py` with the cloud-init
+of `build_cloud_init.py` (no login, no secret; results are collected with
+`collect.py` over signed HTTPS requests). The API key is never handled by
+these scripts: the operator session's network proxy injects it.
+
+| Guard | Where | Interval | Key and address |
+|---|---|---|---|
+| Deletion guard 1 | Claude scheduled task, fresh session per run | hourly, minute 17 | proxy-injected; Vultr allowlist `160.79.106.0/24` |
+| Deletion guard 2 | Claude scheduled task, fresh session per run | hourly, minute 47 | as above |
+| Independent guard | `.github/workflows/s8-vultr-reaper.yml` | every 10 min | IAM service user limited to `compute.baremetal.List/Read/Delete`; its own allowlist |
+
+Every guard run proves that it can really delete: the Claude tasks run
+`--canary` (a free startup script is created, deleted and confirmed 404);
+the GitHub guard runs `--probe-delete` (DELETE of a non-existent server must
+answer 404). Each guard deletes `sila-s8-*` servers tagged `sila-s8` at 5 h
+or after their `sila-s8-delete-after` tag, so the worst case is 6 h:
+6 × $0.41 = $2.46 before tax. `vultr_provision.py create` refuses to run
+without the owner's approved `PLAN@REGION@MAXUSD`, above the $10 budget, or
+while another S-8 server exists.

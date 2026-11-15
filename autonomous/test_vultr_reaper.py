@@ -30,7 +30,7 @@ base = [bm("sila-s8-old", 5 * H + dt.timedelta(minutes=1)), bm("sila-s8-young", 
         bm("sila-s8-stuck", dt.timedelta(minutes=10), status="locked"),
         bm("sila-s8-notag", 40 * H, tags=()), bm("prod-db", 900 * H, tags=())]
 st = {"filler": [], "total": None, "deny": False, "fail": set(), "gone": set(), "sleep": 0,
-      "scripts": {}, "script_survives": False, "script_delete_denied": False}
+      "scripts": {}, "script_survives": False, "script_delete_denied": False, "probe": "ok"}
 deleted = []
 
 
@@ -79,6 +79,12 @@ class API(http.server.BaseHTTPRequestHandler):
             if not st["script_survives"]:
                 st["scripts"].pop(rid, None)
             return self.send(204)
+        if rid == "00000000-0000-0000-0000-000000000000":
+            if st["probe"] == "deny":
+                return self.send(403, {"error": "forbidden"})
+            if st["probe"] == "accept":
+                return self.send(204)
+            return self.send(404, {"error": "Invalid instance-id."})
         if rid in st["fail"]:
             return self.send(403, {"error": "forbidden"})
         if rid in st["gone"]:
@@ -158,6 +164,15 @@ st["script_survives"] = False; st["scripts"].clear(); st["deny"] = True
 rc, out, _ = run("--canary")
 expect("canary: refused source IP fails visibly", (rc, "access denied 401" in out), (1, True))
 st["deny"] = False
+rc, out, _ = run("--probe-delete")
+expect("delete probe: 404 means authorised, then reaps", (rc, "authorised" in out, "sila-s8-old" in deleted), (0, True, True))
+st["probe"] = "deny"
+rc, out, _ = run("--probe-delete")
+expect("delete probe: 403 fails visibly before reaping", (rc, "delete probe failed" in out, deleted), (1, True, []))
+st["probe"] = "accept"
+rc, out, _ = run("--probe-delete")
+expect("delete probe: accepted deletion of a non-existent server fails", (rc, "non-existent" in out), (1, True))
+st["probe"] = "ok"
 os.environ["VULTR_API_KEY"] = ""
 rc, out, _ = run()
 expect("missing key fails loudly", (rc, "VULTR_API_KEY is not set" in out), (1, True))

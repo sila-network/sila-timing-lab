@@ -6,8 +6,15 @@
 # busy top of the hour) delete Vultr bare-metal servers labelled sila-s8-*
 # AND tagged sila-s8 that are 5 h old or older, not active/pending, or past
 # their sila-s8-delete-after tag. The key (secret VULTR_REAPER_API_KEY) is
-# never printed. GitHub-hosted runners use changing IP addresses, so this
-# guard only works if the Vultr API Access Control admits them.
+# never printed.
+#
+# The key belongs to a separate Vultr IAM service user whose policy allows
+# only compute.baremetal.List, Read and Delete (no Create, no billing, no
+# other product). GitHub-hosted runners have changing addresses, so only
+# this service user's own API allowlist admits any address; the account's
+# main key keeps its own address restriction. Every run first proves the
+# delete permission (--probe-delete: DELETE of a non-existent id must
+# answer 404, not 401/403), so a revoked or downgraded key fails visibly.
 name: S-8 billing guard (Vultr reaper)
 
 on:
@@ -38,4 +45,4 @@ jobs:
         env:
           VULTR_API_KEY: ${{ secrets.VULTR_REAPER_API_KEY }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
-        run: python3 -I autonomous/vultr_reaper.py $DRY_RUN --max-age-min 300
+        run: python3 -I autonomous/vultr_reaper.py $DRY_RUN --probe-delete --max-age-min 300
