@@ -25,7 +25,7 @@ def bm(label, age, tags=("sila-s8",), status="active"):
     return {"id": label, "label": label, "status": status, "date_created": iso(age), "tags": list(tags)}
 
 
-base = [bm("sila-s8-old", 5 * H + dt.timedelta(minutes=1)), bm("sila-s8-young", H),
+base = [bm("sila-s8-old", 5 * H + dt.timedelta(minutes=51)), bm("sila-s8-young", H),
         bm("sila-s8-deadline", dt.timedelta(minutes=20), ("sila-s8", f"sila-s8-delete-after={int(now.timestamp()) - 1}")),
         bm("sila-s8-stuck", dt.timedelta(minutes=10), status="locked"),
         bm("sila-s8-notag", 40 * H, tags=()), bm("prod-db", 900 * H, tags=())]
@@ -184,6 +184,79 @@ expect("a dry run without --probe-delete does not probe", (rc, "delete probe" in
 st["probe"] = "ok"
 rc, out, _ = run("--canary")
 expect("canary: script and bare-metal deletion both proven", (rc, "confirmed gone (404)" in out and "authorised" in out), (0, True))
+
+# --- connection gate (--health) ---------------------------------------------
+class SSH(http.server.BaseHTTPRequestHandler):
+    pass
+ssh_srv = socket.socket(); ssh_srv.bind(("127.0.0.1", 0)); ssh_srv.listen(16)
+ssh_on = {"v": True}
+def ssh_loop():
+    while True:
+        try:
+            c, _ = ssh_srv.accept()
+        except OSError:
+            return
+        if ssh_on["v"]:
+            c.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+        c.close()
+threading.Thread(target=ssh_loop, daemon=True).start()
+health_text = {"v": "2026-11-17T10:00:00Z measuring"}
+class Health(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def do_GET(self):
+        if health_text["v"] is None:
+            self.send_response(502); self.end_headers(); return
+        b = health_text["v"].encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+hs = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Health)
+threading.Thread(target=hs.serve_forever, daemon=True).start()
+vr.SSH_PORT = ssh_srv.getsockname()[1]
+vr.HEALTH_URL = f"http://127.0.0.1:{hs.server_address[1]}/health?h={{host}}"
+saved = list(base)
+def gate(servers, *extra):
+    base[:] = servers
+    return run("--health", "--recheck-s", "0.2", *extra)
+young = lambda ip, mins: dict(bm("sila-s8-amd64", dt.timedelta(minutes=mins)), main_ip=ip)
+rc, out, _ = gate([young("127.0.0.1", 10)])
+expect("gate: before 15 min nothing is probed or deleted", (rc, deleted, "SSH" in out), (0, [], False))
+rc, out, _ = gate([young("127.0.0.1", 16)])
+expect("gate: SSH banner after 15 min -> kept", (rc, deleted, "SSH reachable" in out), (0, [], True))
+ssh_on["v"] = False
+rc, out, _ = gate([young("127.0.0.1", 16)])
+expect("gate: no SSH banner twice after 15 min -> deleted, run FAILS (alert)", (rc, deleted, "UNREACHABLE" in out), (1, ["sila-s8-amd64"], True))
+rc, out, _ = gate([young("0.0.0.0", 20)])
+expect("gate: still no IP after 15 min -> deleted, alert", (rc, deleted), (1, ["sila-s8-amd64"]))
+s2 = socket.socket(); s2.bind(("127.0.0.1", 0)); closed2 = s2.getsockname()[1]; s2.close()
+vr.SSH_PORT = closed2
+rc, out, _ = gate([young("127.0.0.1", 16)])
+expect("gate: port 22 closed -> deleted, alert", (rc, deleted), (1, ["sila-s8-amd64"]))
+vr.SSH_PORT = ssh_srv.getsockname()[1]
+rc, out, _ = gate([young("127.0.0.1", 16)], "--dry-run")
+expect("gate: dry run reports but deletes nothing", (deleted, "UNREACHABLE" in out), ([], True))
+ssh_on["v"] = True
+health_text["v"] = "2026-11-17T10:00:00Z preflight\n2026-11-17T10:01:00Z failed: virtualization detected"
+rc, out, _ = gate([young("127.0.0.1", 30)])
+expect("gate: server reports failed run -> deleted, alert", (rc, deleted, "RUN FAILED" in out), (1, ["sila-s8-amd64"], True))
+health_text["v"] = None
+rc, out, _ = gate([young("127.0.0.1", 30)])
+expect("gate: SSH up, /health not answering yet -> kept", (rc, deleted), (0, []))
+health_text["v"] = "2026-11-17T13:00:00Z done: PASS"
+rc, out, _ = gate([young("127.0.0.1", 200)])
+expect("gate: finished run is kept for the owner (deadline still applies)", (rc, deleted), (0, []))
+rc, out, _ = gate([dict(young("127.0.0.1", 5), label="other", tags=[])])
+expect("gate: never probes or touches non-S-8 servers", (rc, deleted), (0, []))
+rc, out, took = gate([], "--watch", "5")
+expect("watch: stops at once when no S-8 server is left", (rc, took < 5), (0, True))
+ssh_on["v"] = False
+rc, out, took = gate([young("127.0.0.1", 16)], "--watch", "5")
+expect("watch: unreachable server deleted and alerted, then stops", (rc, deleted, took < 30), (1, ["sila-s8-amd64"], True))
+ssh_on["v"] = True
+base[:] = saved
+p = subprocess.run([sys.executable, "-I", os.path.join(here, "vultr_reaper.py"), "--dry-run"],
+                   env={**os.environ, "S8_HEALTH_URL": "https://attacker.example/{host}"}, capture_output=True, text=True)
+expect("foreign S8_HEALTH_URL refused", (p.returncode, "refusing S8_HEALTH_URL" in p.stdout), (1, True))
+
 os.environ["VULTR_API_KEY"] = ""
 rc, out, _ = run()
 expect("missing key fails loudly", (rc, "VULTR_API_KEY is not set" in out), (1, True))

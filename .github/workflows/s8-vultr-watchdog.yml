@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Ahmed Ibrahim
+#
+# Watchdog for ONE S-8 run on Vultr bare metal, dispatched right after the
+# server is created (vultr_provision.py says so). It runs on GitHub, not in
+# any operator or Claude session, and applies the same rules as the
+# scheduled guard (s8-vultr-reaper.yml) every minute instead of every 10:
+#   - no SSH banner on port 22 fifteen minutes after creation (checked
+#     twice, 60 s apart), or the server reports a failed run -> delete;
+#   - the sila-s8-delete-after deadline (creation + 5 h 50 min) -> delete.
+# It ends when no S-8 server is left or after 5 h 55 min (GitHub's 6 h job
+# limit); the scheduled guard keeps covering the server after that. A
+# connection-gate deletion fails the run, so GitHub notifies the owner.
+# Same secret as the guard: VULTR_REAPER_API_KEY (List/Read/Delete only).
+name: S-8 watchdog (Vultr, one run)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s8-vultr-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    if: github.repository == 'sila-network/sila-timing-lab' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 358
+    steps:
+      - uses: actions/checkout@v4
+      - name: Connection gate and deadline, every minute
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_REAPER_API_KEY }}
+        run: python3 -I autonomous/vultr_reaper.py --probe-delete --health --max-age-min 350 --watch 355

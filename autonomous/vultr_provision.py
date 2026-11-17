@@ -9,7 +9,7 @@ token that the session's network proxy replaces (VULTR_API_KEY, default
 repository or a log.
 
   vultr_provision.py quote  [--region R]
-  vultr_provision.py create --region R --lab-sha SHA --pubkey B64 --approved PLAN@REGION@MAXUSD
+  vultr_provision.py create --region R --lab-sha SHA --pubkey B64 --ssh-pubkey FILE.pub --approved PLAN@REGION@MAXUSD
   vultr_provision.py show   <id>
   vultr_provision.py delete <id>          # deletes, then confirms 404
 
@@ -19,11 +19,20 @@ create refuses unless:
   - the 6-hour worst case (reaper deadline 5 h + one guard interval) stays
     within the approved MAXUSD and within BUDGET_USD (10);
   - --approved names this exact plan, region and limit, as the owner
-    approved it.
+    approved it;
+  - the independent billing guard is live: the latest run of the scheduled
+    GitHub workflow s8-vultr-reaper.yml on main succeeded within the last
+    GUARD_MAX_AGE_MIN minutes (each real run proves the bare-metal delete
+    permission and applies the 15-minute SSH connection gate), so a
+    server that never becomes reachable is deleted without any operator or
+    Claude session;
+  - --ssh-pubkey is one OpenSSH PUBLIC key (recovery and phase-1 check).
 
 The server gets the label "sila-s8-amd64", the tags "sila-s8" and
-"sila-s8-delete-after=<creation + 5 h>", so both reapers select it, and
-the cloud-init of build_cloud_init.py for the given lab commit.
+"sila-s8-delete-after=<creation + 5 h 50 min>", so the guard selects it,
+and the cloud-init of build_cloud_init.py for the given lab commit. After
+creation, dispatch the watchdog workflow (s8-vultr-watchdog.yml) at once:
+it applies the same gate every minute instead of every 10.
 """
 import argparse
 import base64
@@ -33,20 +42,27 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import datetime as dt
 
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 import build_cloud_init  # noqa: E402
 
-API = "https://api.vultr.com/v2"
+API = os.environ.get("VULTR_API_URL", "https://api.vultr.com/v2")
+GH_API = os.environ.get("GITHUB_API_URL_S8", "https://api.github.com")
+for _u in (API, GH_API):
+    if _u not in ("https://api.vultr.com/v2", "https://api.github.com") and not _u.startswith("http://127.0.0.1:"):
+        raise SystemExit(f"refusing API URL {_u!r}")
+GUARD = "/repos/sila-network/sila-timing-lab/actions/workflows/s8-vultr-reaper.yml/runs?branch=main&event=schedule&per_page=1"
+GUARD_MAX_AGE_MIN = 30
 PLAN = "vbm-6c-32gb-amd"
 CPU = "EPYC 4245P"
 OS_ID = 2284  # Ubuntu 24.04 LTS x64
 LABEL = "sila-s8-amd64"
 BUDGET_USD = 10.0
-WORST_HOURS = 6.0
-EXPECTED_HOURS = 3.0
-DEADLINE_S = 5 * 3600
+WORST_HOURS = 6.0   # deadline 5 h 50 min + one guard interval
+EXPECTED_HOURS = 3.5
+DEADLINE_S = 350 * 60
 
 
 def call(method, path, body=None):
@@ -102,6 +118,25 @@ def quote(region):
     return p, avail
 
 
+def guard_ready(now=None):
+    """The scheduled guard on main ran successfully within GUARD_MAX_AGE_MIN."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    try:
+        with urllib.request.urlopen(urllib.request.Request(GH_API + GUARD, headers={"Accept": "application/vnd.github+json"}), timeout=30) as r:
+            runs = json.loads(r.read()).get("workflow_runs", [])
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        return f"cannot read the guard's runs ({type(e).__name__}); it may not be on main yet"
+    if not runs:
+        return "the guard workflow has no scheduled run on main"
+    r = runs[0]
+    if r.get("status") != "completed" or r.get("conclusion") != "success":
+        return f"the latest guard run is {r.get('status')}/{r.get('conclusion')} ({r.get('html_url')})"
+    age = now - dt.datetime.fromisoformat(r["updated_at"].replace("Z", "+00:00"))
+    if age > dt.timedelta(minutes=GUARD_MAX_AGE_MIN):
+        return f"the latest successful guard run is {age} old (more than {GUARD_MAX_AGE_MIN} min)"
+    return None
+
+
 def create(a):
     p = plan()
     h = float(p["hourly_cost"])
@@ -116,7 +151,13 @@ def create(a):
         raise SystemExit(f"{PLAN} is not available in {a.region} now")
     if any(s.get("label", "").startswith("sila-s8-") for s in ok("GET", "/bare-metals?per_page=500")["bare_metals"]):
         raise SystemExit("an S-8 server already exists; refusing to create a second one")
-    user_data = build_cloud_init.build(a.pubkey, a.lab_sha)
+    ssh_pubkey = open(a.ssh_pubkey).read()
+    if "PRIVATE KEY" in ssh_pubkey:
+        raise SystemExit("--ssh-pubkey names a PRIVATE key; give the .pub file")
+    user_data = build_cloud_init.build(a.pubkey, a.lab_sha, ssh_pubkey)
+    why = guard_ready()
+    if why:
+        raise SystemExit(f"billing guard not proven live: {why}; refusing to create a billed server")
     deadline = int(time.time()) + DEADLINE_S
     d = ok("POST", "/bare-metals", {
         "region": a.region, "plan": PLAN, "os_id": OS_ID, "label": LABEL, "hostname": LABEL,
@@ -126,6 +167,8 @@ def create(a):
     })["bare_metal"]
     print(json.dumps({k: d.get(k) for k in ("id", "label", "tags", "status", "main_ip", "region", "plan", "date_created")}))
     print(f"delete-after: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(deadline))}")
+    print("NEXT: dispatch .github/workflows/s8-vultr-watchdog.yml now (1-minute connection gate; "
+          "deletes the server if SSH is not up 15 min after creation)")
 
 
 def show(sid):
@@ -163,6 +206,7 @@ def main(argv):
     c.add_argument("--lab-sha", required=True)
     c.add_argument("--pubkey", required=True)
     c.add_argument("--approved", required=True)
+    c.add_argument("--ssh-pubkey", required=True, help="file with ONE OpenSSH public key")
     for n in ("show", "delete"):
         sub.add_parser(n).add_argument("id")
     a = ap.parse_args(argv)
