@@ -74,7 +74,8 @@ jobs:
       - name: Autonomous x86-64 server (signed endpoint, two-phase cloud-init, run.sh)
         run: |
           python3 -m pip install --quiet --user "cryptography==44.0.3"
-          sudo apt-get install -y -qq cloud-init nftables >/dev/null
+          sudo apt-get install -y -qq cloud-init nftables caddy >/dev/null
+          sudo systemctl disable --now caddy >/dev/null 2>&1 || true
           cd autonomous
           bash -n run.sh endpoint.sh
           python3 -m py_compile serve.py collect.py build_cloud_init.py test_run.py
@@ -83,6 +84,9 @@ jobs:
           # run.sh: phase-1 failures stop early and never pass; phase 2 only
           # after phase 1; interruption resumes, never counts partial output.
           python3 -I test_run.py
+          # The same with the REAL Go 1.25.14 download, checksum and go list
+          # at the approved SHA (as root: run.sh uses /var/cache).
+          sudo env PATH="$PATH" S8_REAL_GO=1 python3 -I test_run.py
           # cloud-init: built from this commit; public keys only; phase 1 =
           # stock boot (no reboot, no grub), provider firewalls off at boot,
           # SSH key-only on 22, firewall 22/80/443; valid for cloud-init itself.
@@ -103,7 +107,7 @@ jobs:
           priv = open(sys.argv[2]).read().split("\n")[1]
           assert priv not in text, "owner private key leaked"
           assert d["ssh_pwauth"] is False and len(d["ssh_authorized_keys"]) == 1 and d["ssh_authorized_keys"][0].startswith("ssh-ed25519 ")
-          assert "PasswordAuthentication no" in files["/etc/ssh/sshd_config.d/10-sila-s8.conf"]["content"]
+          assert "PasswordAuthentication no" in files["/etc/ssh/sshd_config.d/00-sila-s8.conf"]["content"]
           assert any("ufw --force disable" in str(c) for c in d["bootcmd"]), "provider firewall must be off from boot"
           nft = files["/etc/nftables.conf"]["content"]
           assert "tcp dport { 22, 80, 443 } accept" in nft and "policy drop" in nft, "firewall"
@@ -119,6 +123,8 @@ jobs:
           print("cloud-init ok")
           PY
           sudo nft -c -f /tmp/nft.conf && echo "nftables syntax ok"
+          # Real nftables in a network namespace + real Caddy in front of serve.py.
+          sudo env PATH="$PATH" bash test_network.sh "$RUNNER_TEMP/ci.yaml"
           # An SSH private key or a malformed key is refused.
           if python3 -I build_cloud_init.py "$key" "$(git rev-parse HEAD)" "$(cat "$RUNNER_TEMP/owner")" >/dev/null 2>&1; then echo "::error::private key accepted"; exit 1; fi
           # Provenance: a modified worktree is never embedded; an unknown commit is refused.
@@ -139,13 +145,16 @@ jobs:
           python3 -m py_compile autonomous/vultr_reaper.py autonomous/vultr_provision.py
           python3 -I autonomous/test_vultr_reaper.py
           python3 -I autonomous/test_vultr_provision.py
+          # Owner's decision: deletion is manual. The reaper workflow stays
+          # dormant (no secret) and, if ever enabled, must not cut a valid
+          # measurement short (5 h bound + setup < 350 min). No other
+          # automatic deletion exists.
           w=.github/workflows/s8-vultr-reaper.yml
-          grep -q -- '--probe-delete --health --max-age-min 350' $w
-          grep -q 'cron: "5-59/10 \* \* \* \*"' $w
-          w=.github/workflows/s8-vultr-watchdog.yml
-          grep -q -- '--probe-delete --health --max-age-min 350 --watch 355' $w
-          grep -q "github.ref == 'refs/heads/main'" $w
-          echo "Vultr guard + watchdog ok"
+          grep -q -- '--probe-delete --max-age-min 350' $w
+          grep -q 'DORMANT by the owner' $w
+          if ls .github/workflows | grep -q watchdog; then echo "::error::unexpected automatic-deletion workflow"; exit 1; fi
+          if grep -n 'DELETE' autonomous/vultr_provision.py | grep -v 'def delete\|call("DELETE", f"/bare-metals/{sid}")'; then echo "::error::unexpected deletion path in vultr_provision.py"; exit 1; fi
+          echo "Vultr: manual deletion, dormant reaper ok"
           python3 -m py_compile autonomous/scw_job.py
           python3 -I autonomous/test_scw_job.py
       - name: Autonomous run rejects a virtual machine (this runner) and never counts it

@@ -3,8 +3,9 @@
 # Copyright 2026 Ahmed Ibrahim
 """Self-test of vultr_provision.py against local mocks of the Vultr and
 GitHub APIs: nothing billable is ever created unless the owner's approval
-matches, the billing guard is proven live, the SSH key is a public key and
-no S-8 server exists; the request carries no secret."""
+matches, the SSH key is a public key and no S-8 server exists; the request
+carries no secret; no billing guard is required (deletion is manual); and
+"check" only reads (never deletes) and reports phase 1, failure or silence."""
 import base64
 import datetime as dt
 import http.server
@@ -17,7 +18,7 @@ import threading
 
 here = os.path.dirname(os.path.abspath(__file__))
 now = dt.datetime.now(dt.timezone.utc)
-st = {"servers": [], "avail": True, "runs": None, "posts": []}
+st = {"servers": [], "avail": True, "posts": [], "deletes": [], "health": None, "server": None}
 
 
 class Mock(http.server.BaseHTTPRequestHandler):
@@ -33,8 +34,14 @@ class Mock(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self.path
-        if p.startswith("/repos/"):
-            return self.send(200, {"workflow_runs": st["runs"]}) if st["runs"] is not None else self.send(404, {"message": "Not Found"})
+        if p.startswith("/health"):
+            if st["health"] is None:
+                return self.send(502, {})
+            b = st["health"].encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+            return
+        if p.startswith("/bare-metals/"):
+            return self.send(200, {"bare_metal": st["server"]}) if st["server"] else self.send(404, {"error": "not found"})
         if p.startswith("/plans-metal"):
             return self.send(200, {"plans_metal": [{"id": "vbm-6c-32gb-amd", "cpu_model": "EPYC 4245P", "hourly_cost": 0.41,
                                                     "monthly_cost": 295, "cpu_cores": 6, "cpu_threads": 12, "ram": 32768, "locations": ["ewr"]}]})
@@ -45,6 +52,10 @@ class Mock(http.server.BaseHTTPRequestHandler):
         if p.startswith("/account"):
             return self.send(200, {"account": {"balance": -50, "pending_charges": 0}})
         self.send(404, {})
+
+    def do_DELETE(self):
+        st["deletes"].append(self.path)
+        self.send(204, {})
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -60,7 +71,7 @@ tmp = tempfile.mkdtemp()
 pub = os.path.join(tmp, "id.pub")
 open(pub, "w").write("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq7o0Yq3bq0b6Jm1y0s2c3d4e5f6a7b8c9d0e1f2a3b4 owner@laptop\n")
 priv = os.path.join(tmp, "id")
-open(priv, "w").write("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n")
+open(priv, "w").write("-----BEGIN OPENSSH " + "PRIVATE KEY-----\nnot-a-key\n-----END OPENSSH " + "PRIVATE KEY-----\n")
 collector = base64.b64encode(os.urandom(32)).decode()
 lab = subprocess.run(["git", "-C", here, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
 fails = 0
@@ -76,36 +87,17 @@ def expect(name, got, want):
 def run(*args):
     st["posts"].clear()
     p = subprocess.run([sys.executable, "-I", os.path.join(here, "vultr_provision.py"), *args],
-                       env={**os.environ, "VULTR_API_URL": URL, "GITHUB_API_URL_S8": URL, "VULTR_API_KEY": "vk-secret-never-sent-in-body"},
+                       env={**os.environ, "VULTR_API_URL": URL, "S8_HEALTH_URL": URL + "/health?ip={ip}", "VULTR_API_KEY": "vk-secret-never-sent-in-body"},
                        capture_output=True, text=True)
     return p.returncode, p.stdout + p.stderr, len(st["posts"])
 
 
-def run_ok(minutes=5, conclusion="success"):
-    t = (now - dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return [{"status": "completed", "conclusion": conclusion, "updated_at": t, "html_url": "https://github.com/x"}]
-
-
 create = ["create", "--region", "ewr", "--lab-sha", lab, "--pubkey", collector, "--ssh-pubkey", pub]
-st["runs"] = run_ok()
 rc, out, posts = run(*create, "--approved", "vbm-6c-32gb-amd@ewr@2")
 expect("approval below the 6 h worst case ($2.46): refused, nothing created", (rc != 0, posts), (True, 0))
 rc, out, posts = run(*create, "--approved", "vbm-6c-32gb-amd@ams@3")
 expect("approval for another region: refused, nothing created", (rc != 0, posts), (True, 0))
 A = ["--approved", "vbm-6c-32gb-amd@ewr@3"]
-st["runs"] = None
-rc, out, posts = run(*create, *A)
-expect("guard workflow not on main: refused, nothing created", (rc != 0, "billing guard not proven live" in out, posts), (True, True, 0))
-st["runs"] = []
-rc, out, posts = run(*create, *A)
-expect("guard never ran: refused", (rc != 0, posts), (True, 0))
-st["runs"] = run_ok(conclusion="failure")
-rc, out, posts = run(*create, *A)
-expect("guard's latest run failed: refused", (rc != 0, "completed/failure" in out, posts), (True, True, 0))
-st["runs"] = run_ok(minutes=45)
-rc, out, posts = run(*create, *A)
-expect("guard's latest success is stale (45 min): refused", (rc != 0, posts), (True, 0))
-st["runs"] = run_ok()
 rc, out, posts = run("create", "--region", "ewr", "--lab-sha", lab, "--pubkey", collector, "--ssh-pubkey", priv, *A)
 expect("private key given as SSH key: refused, nothing created", (rc != 0, "PRIVATE key" in out, posts), (True, True, 0))
 st["servers"] = [{"id": "x", "label": "sila-s8-amd64", "tags": ["sila-s8"]}]
@@ -127,7 +119,38 @@ expect("request: plan, label, guard tag", (path, body["plan"], body["label"], "s
 expect("request: delete-after = creation + 5 h 50 min", abs(deadline - (now.timestamp() + 350 * 60)) < 120, True)
 expect("request: cloud-init carries the SSH public key, no private key, no API key",
        ("ssh-ed25519 AAAAC3Nza" in ud, "PRIVATE KEY" in ud, "vk-secret" in json.dumps(body)), (True, False, False))
-expect("output tells to dispatch the watchdog", "s8-vultr-watchdog.yml" in out, True)
+expect("no billing guard is required; output points to check and manual deletion",
+       ("check new-id" in out, "Deletion is manual" in out, "guard" in out.lower()), (True, True, False))
+expect("create never deletes anything", st["deletes"], [])
+
+# check: read-only follow-up of phase 1
+st["server"] = {"id": "s1", "status": "active", "power_status": "running", "main_ip": "127.0.0.1"}
+def chk(*extra):
+    st["posts"].clear(); st["deletes"].clear()
+    p = subprocess.run([sys.executable, "-I", os.path.join(here, "vultr_provision.py"), "check", "s1", "--interval", "0.2", *extra],
+                       env={**os.environ, "VULTR_API_URL": URL, "S8_HEALTH_URL": URL + "/health?ip={ip}"}, capture_output=True, text=True, timeout=60)
+    return p.returncode, p.stdout, st["deletes"], st["posts"]
+st["health"] = "2026-11-19T10:05:00Z phase 1: ok"
+rc, out, dels, posts = chk()
+expect("check: phase 1 ok -> exit 0, nothing deleted or created", (rc, "phase 1 ok" in out, dels, posts), (0, True, [], []))
+st["health"] = "2026-11-19T11:00:00Z measuring (attempt 1 of 3)"
+expect("check: later phase also counts as phase 1 ok", chk()[0], 0)
+st["health"] = "2026-11-19T12:00:00Z already finished; not repeating"
+expect("check: finished run (after a reboot) counts as phase 1 ok", chk()[0], 0)
+st["health"] = "2026-11-19T10:03:00Z failed: SSH is not listening on port 22"
+rc, out, dels, _ = chk()
+expect("check: server reports failure -> exit 3, ALERT, nothing deleted", (rc, "ALERT" in out, dels), (3, True, []))
+st["health"] = None
+rc, out, dels, _ = chk("--minutes", "0.02")
+expect("check: no answer within the limit -> exit 2, ALERT to delete manually, nothing deleted", (rc, "ALERT" in out and "manually" in out, dels), (2, True, []))
+st["health"] = "2026-11-19T10:01:00Z phase 1: checks"
+rc, out, dels, _ = chk("--minutes", "0.02")
+expect("check: stuck before phase 1 ok -> exit 2", (rc, dels), (2, []))
+st["server"] = None
+expect("check: server gone -> exit 4", chk()[0], 4)
+p = subprocess.run([sys.executable, "-I", os.path.join(here, "vultr_provision.py"), "quote"],
+                   env={**os.environ, "S8_HEALTH_URL": "http://attacker.example/{ip}"}, capture_output=True, text=True)
+expect("foreign S8_HEALTH_URL refused", (p.returncode != 0, "refusing S8_HEALTH_URL" in p.stdout + p.stderr), (True, True))
 srv.shutdown()
 print(f"failures: {fails}")
 sys.exit(1 if fails else 0)

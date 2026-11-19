@@ -9,7 +9,8 @@ API key from the environment variable VULTR_API_KEY (never printed).
 A bare-metal server is a candidate only if BOTH hold:
   - its label starts with "sila-s8-",
   - it carries the tag "sila-s8".
-A candidate is deleted when it is at least MAX_AGE old (default 5 h), or
+A candidate is deleted when it is at least MAX_AGE old (default 5 h 50 min:
+setup plus the 5 h measurement bound must fit before it), or
 its tag "sila-s8-delete-after=<unix time>" has passed (or is malformed), or
 its status is not active/pending (errored servers keep billing too).
 Other servers are never touched.
@@ -20,22 +21,6 @@ timeout (VULTR_TIMEOUT seconds, default 30), an incomplete listing, or a
 failed deletion. A 404 on deletion (already removed) is not a failure.
 
   vultr_reaper.py [--dry-run | --canary] [--probe-delete] [--max-age-min 350]
-                  [--health [--ssh-deadline-min 15] [--recheck-s 60]] [--watch MIN]
-
---health adds the connection gate, so a server that cannot be reached is
-never left billing for hours. For each candidate at least SSH_DEADLINE old
-(default 15 min after creation):
-  - unreachable: no "SSH-" banner on port 22 of its main IPv4, checked
-    twice RECHECK seconds apart (a single lost packet never deletes) ->
-    delete and FAIL the run (exit 1, so GitHub notifies the owner);
-  - the server reports its own run failed (unauthenticated /health of the
-    result endpoint starts with "failed") -> delete and FAIL the run.
-A reachable server whose /health is not answering yet is kept (the TLS
-certificate may still be pending); SSH is the connection criterion.
-
---watch MIN repeats the whole pass every 60 s for up to MIN minutes and
-stops early once no S-8 server is left (the watchdog workflow, dispatched
-right after creation, so the 15-minute gate does not wait for cron).
 
 --canary proves that this key, from this source address, can really
 delete: it creates a free startup script named "sila-s8-canary-<time>",
@@ -57,9 +42,6 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-import socket
-import ssl
-import time
 
 API = os.environ.get("VULTR_API_URL", "https://api.vultr.com/v2")
 if API != "https://api.vultr.com/v2" and not API.startswith("http://127.0.0.1:"):
@@ -68,11 +50,6 @@ if API != "https://api.vultr.com/v2" and not API.startswith("http://127.0.0.1:")
 TIMEOUT = float(os.environ.get("VULTR_TIMEOUT", "30"))
 PREFIX = "sila-s8-"
 TAG = "sila-s8"
-SSH_PORT = int(os.environ.get("S8_SSH_PORT", "22"))
-HEALTH_URL = os.environ.get("S8_HEALTH_URL", "https://{host}.sslip.io/health")
-if HEALTH_URL != "https://{host}.sslip.io/health" and not HEALTH_URL.startswith("http://127.0.0.1:"):
-    print(f"::error::refusing S8_HEALTH_URL {HEALTH_URL!r}")
-    sys.exit(1)
 
 
 class ReaperError(Exception):
@@ -138,50 +115,6 @@ def decide(s, now, max_age):
     return None
 
 
-def ssh_banner(ip, timeout=10):
-    """True if something on ip:22 greets with an SSH banner."""
-    if not ip or ip == "0.0.0.0":
-        return False
-    try:
-        with socket.create_connection((ip, SSH_PORT), timeout=timeout) as c:
-            c.settimeout(timeout)
-            return c.recv(64).startswith(b"SSH-")
-    except OSError:
-        return False
-
-
-def health(ip, timeout=15):
-    """The server's own phase line from /health, or None if not answering."""
-    if not ip or ip == "0.0.0.0":
-        return None
-    url = HEALTH_URL.format(host=ip.replace(".", "-"))
-    try:
-        with urllib.request.urlopen(url, timeout=timeout, context=ssl.create_default_context()) as r:
-            return r.read(300).decode("utf-8", "replace").strip()
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        return None
-
-
-def health_reason(s, now, deadline, recheck_s):
-    """Connection gate (--health): a reason to delete, or None."""
-    age = now - dt.datetime.fromisoformat(s["date_created"].replace("Z", "+00:00"))
-    if age < deadline:
-        return None
-    ip = s.get("main_ip", "")
-    if not ssh_banner(ip):
-        time.sleep(recheck_s)
-        if not ssh_banner(ip):
-            return f"UNREACHABLE: no SSH banner on {ip or 'no IP'}:22 at age {age} (checked twice, {recheck_s} s apart)"
-    h = health(ip)
-    if h is None:
-        print(f"  {s['id']}: SSH reachable; /health not answering yet")
-    else:
-        print(f"  {s['id']}: SSH reachable; /health: {h.splitlines()[-1] if h else ''}")
-        if h.splitlines() and h.splitlines()[-1].split(" ", 1)[-1].startswith("failed"):
-            return f"RUN FAILED on the server: {h.splitlines()[-1]}"
-    return None
-
-
 def canary(key, now):
     name = f"{PREFIX}canary-{int(now.timestamp())}"
     script = base64.b64encode(b"#!/bin/sh\n# SILA S-8 deletion canary; never run\nexit 0\n").decode()
@@ -223,10 +156,6 @@ def _main(argv):
     mode.add_argument("--canary", action="store_true")
     ap.add_argument("--probe-delete", action="store_true")
     ap.add_argument("--max-age-min", type=int, default=350)
-    ap.add_argument("--health", action="store_true")
-    ap.add_argument("--ssh-deadline-min", type=float, default=15)
-    ap.add_argument("--recheck-s", type=float, default=60)
-    ap.add_argument("--watch", type=float, default=0, metavar="MIN")
     a = ap.parse_args(argv)
     key = os.environ.get("VULTR_API_KEY", "")
     if not key:
@@ -244,35 +173,11 @@ def _main(argv):
     if a.probe_delete or not a.dry_run:
         # Every real run proves the bare-metal delete permission first.
         probe_delete(key)
-    end = time.time() + a.watch * 60
-    alerts = 0
-    while True:
-        rc, left, alert = reap(a, key)
-        alerts += alert
-        if rc or not a.watch or left == 0 or time.time() >= end:
-            break
-        time.sleep(60)
-    if alerts:
-        print(f"::error::{alerts} S-8 server(s) deleted by the connection gate (unreachable or failed run); see above")
-        return 1
-    return rc
-
-
-def reap(a, key):
-    """One pass: returns (status, candidates left, connection-gate deletions)."""
-    now = dt.datetime.now(dt.timezone.utc)
     servers = list_bare_metals(key)
     print(f"{now:%Y-%m-%dT%H:%M:%SZ} vultr: {len(servers)} bare-metal server(s) visible")
-    failures = alerts = left = 0
+    failures = 0
     for s in servers:
         reason = decide(s, now, dt.timedelta(minutes=a.max_age_min))
-        if reason is None and a.health and s.get("label", "").startswith(PREFIX) and TAG in (s.get("tags") or []):
-            reason = health_reason(s, now, dt.timedelta(minutes=a.ssh_deadline_min), a.recheck_s)
-            if reason:
-                print(f"::error::{s['id']}: {reason}")
-                alerts += 1
-        if s.get("label", "").startswith(PREFIX) and TAG in (s.get("tags") or []) and not reason:
-            left += 1
         print(f"  {s['id']} {s.get('label')!r} status={s.get('status')} created={s.get('date_created')} -> "
               + (f"DELETE ({reason})" if reason else "keep"))
         if reason and not a.dry_run:
@@ -285,8 +190,7 @@ def reap(a, key):
                 else:
                     print(f"::error::delete {s['id']} failed: {e}")
                     failures += 1
-                    left += 1
-    return (1 if failures else 0), left, alerts
+    return 1 if failures else 0
 
 
 def main(argv=None):

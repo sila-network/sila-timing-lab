@@ -345,7 +345,7 @@ behind a browser check). Two causes remain possible and both are removed:
 | Host did not come back from the cloud-init reboot with `isolcpus/nohz_full/nosmt` | grub change + `reboot` in runcmd | no reboot, no boot setting; isolation is runtime-only (phase 2) and undone by any reboot |
 | Provider firewall (ufw) still dropping 80/443 (runcmd not reached) | ufw switched off late, in runcmd | ufw/firewalld off in `bootcmd`, first thing on every boot |
 | No way in to diagnose | SSH disabled by design | SSH on 22, key only (owner's public key), plus Vultr View Console |
-| Billing for 18.6 h | deadline guards depended on Claude sessions; independent guard not live | creation refused unless the GitHub guard on main succeeded within 30 min; 15-minute SSH gate |
+| Billing for 18.6 h unnoticed | no early signal; nothing reachable | `check` reports phase 1, failure or silence within 15 min (plain-HTTP `/health`); deletion stays manual |
 
 ### Two phases
 
@@ -368,43 +368,64 @@ behind a browser check). Two causes remain possible and both are removed:
 Resumable: verified steps are not redone after a restart or reboot; an
 interrupted measurement is never continued or counted (its partial output is
 moved out of the result directory) and starts again, at most 3 attempts.
-The phase is visible without credentials at `https://<ip-with-dashes>.sslip.io/health`
-(last status line only; results need the collector's signature).
+The phase is visible without credentials at `http://<ip>/health` (also over
+HTTPS; last status line only; results need the collector's signature).
+Phase 1 also checks the EFFECTIVE sshd settings (`sshd -T`: password and
+keyboard-interactive login off, public key on) and that the owner's key is
+installed for root.
 
-### Billing guards (independent of any Claude session)
+### Deletion is manual (owner's decision, 2026-11-19)
 
-| Guard | Where | When | Deletes |
-|---|---|---|---|
-| Scheduled guard | `.github/workflows/s8-vultr-reaper.yml` (main) | every 10 min | no SSH banner 15 min after creation (twice, 60 s apart); `/health` says `failed`; age ≥ 5 h 50 min / `sila-s8-delete-after`; status not active/pending |
-| Watchdog | `.github/workflows/s8-vultr-watchdog.yml` (main), dispatched right after creation | every minute for 5 h 55 min | the same rules |
+The owner deletes the server in the Vultr console. Nothing in this lab
+deletes a server unless the owner runs `vultr_provision.py delete <id>`.
 
-Both use the secret `VULTR_REAPER_API_KEY` of a Vultr IAM service user
-limited to `compute.baremetal.List/Read/Delete`, prove the delete
-permission on every run (`--probe-delete`), and fail the run (GitHub
-notifies the owner) when the connection gate deletes a server.
-`vultr_provision.py create` refuses to create anything unless: the owner's
-`--approved PLAN@REGION@MAXUSD` matches and covers the 6 h worst case
-(6 × $0.41 = $2.46 before tax), no S-8 server exists, `--ssh-pubkey` is a
-public key, and the scheduled guard's latest run on main succeeded within
-30 minutes. Claude scheduled tasks are convenience only, never the guard.
+| Automatic deletion logic | State | Conflict with manual deletion |
+|---|---|---|
+| `.github/workflows/s8-vultr-reaper.yml` (`vultr_reaper.py`) | **dormant**: not on main, secret `VULTR_REAPER_API_KEY` not set | only if merged **and** the secret is set: it would delete an S-8 server at 5 h 50 min (or past its `sila-s8-delete-after` tag, or if not active/pending). Keep the secret unset, or disable the workflow in Actions, to keep deletion manual. |
+| Claude scheduled tasks "SILA S-8 Vultr deletion guard 1/2" | **disabled** since 2026-11-15 | none while disabled |
+| Scaleway reaper / Serverless Job | other provider | none for Vultr |
 
-### Cost plan for the next attempt (before tax)
+`vultr_provision.py create` requires no guard. Right after creation, run
+the read-only follow-up (it never deletes):
+
+```
+python3 -I autonomous/vultr_provision.py check <server id>     # up to 15 min
+```
+
+Exit 0: phase 1 ok (SSH, firewall, cloud-init, GitHub, Go, SILA verified on
+the server). Exit 2: no phase 1 within 15 min. Exit 3: the server reports
+`failed: …`. On 2 or 3: SSH in or open View Console, or delete the server
+to stop billing. It uses the plain-HTTP `/health` (phase only), so it does
+not depend on the TLS certificate. It runs in the operator's session: an
+alert, not a billing guarantee.
+
+### Cost (vbm-6c-32gb-amd, $0.41/h before tax; checked 2026-11-19, available in ewr)
 
 | Step | Time | Cost |
 |---|---|---|
 | Install + cloud-init + phase 1 | ~10–15 min | ~$0.10 |
-| Connection gate fails → deleted | by 15–17 min (watchdog) / ≤ 27 min (scheduled) | ≤ $0.19 |
-| Measurement (1,000,000 × 10) | ~2.5–3.5 h, bounded at 5 h | ~$1.0–1.45 |
-| Hard ceiling (deadline + one guard interval) | 6 h | $2.46 |
+| Measurement 1,000,000 × 10 | ~45 min measured-scale estimate (20,000 × 2 took 11.3 s on a 2.1 GHz Xeon VM; ×250); bounded at 5 h | ~$0.30–0.60 expected |
+| Server left running after `done` | until the owner deletes it | $0.41 per hour |
 
-### Prerequisites before the next server (owner)
+### Collecting the evidence
 
-1. Merge the guard (this branch) to main.
-2. Create the Vultr IAM service user (List/Read/Delete bare metal only), add
-   its key as repository secret `VULTR_REAPER_API_KEY`; its API allowlist
-   must admit GitHub-hosted runners.
-3. Wait for one green scheduled run of *S-8 billing guard (Vultr reaper)*.
-4. Provide one SSH **public** key (`~/.ssh/id_ed25519.pub`).
+Over HTTPS (needs the certificate): `collect.py fetch https://<ip-with-dashes>.sslip.io <collector.key> results/amd64-baremetal`.
+sslip.io is not on the Public Suffix List, so Let's Encrypt issuance can be
+rate-limited; if HTTPS does not come up, collect over SSH (owner's key):
+
+```
+scp -r root@<ip>:/var/lib/sila-s8/out results/amd64-baremetal
+(cd results/amd64-baremetal && sha256sum -c SHA256SUMS)
+bash scripts/check_evidence.sh results/amd64-baremetal amd64-baremetal full 75939d59602318e8eb3561b150cf0944035a03b5
+```
+
+### Not proven before a real run
+
+The simulations and the real tools (cloud-init schema, nftables in a
+network namespace, Caddy, sshd -T, the Go download, the official timing
+script at reduced size) cannot prove that the Vultr image boots this
+cloud-init as intended, that Vultr's network delivers 22/80/443, or that a
+certificate is issued. `check` answers the first two within 15 minutes.
 
 ### Recovery through Vultr View Console
 

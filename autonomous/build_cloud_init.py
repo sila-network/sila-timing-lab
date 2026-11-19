@@ -88,8 +88,9 @@ def build(pubkey, lab_sha, ssh_pubkey):
     for path, (mode, data) in files.items():
         out += [f"  - path: {path}", f"    permissions: \"{mode}\"", "    encoding: b64", f"    content: {data}"]
     out += [
-        "  - path: /etc/ssh/sshd_config.d/10-sila-s8.conf",
+        "  - path: /etc/ssh/sshd_config.d/00-sila-s8.conf",
         "    content: |",
+        "      # 00-: read first; sshd keeps the first value of each setting.",
         "      PasswordAuthentication no",
         "      KbdInteractiveAuthentication no",
         "      PermitRootLogin prohibit-password",

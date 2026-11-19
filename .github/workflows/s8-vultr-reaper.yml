@@ -4,14 +4,9 @@
 # Billing guard for an S-8 server on Vultr bare metal, independent of any
 # operator session: every 10 minutes (minutes 5, 15, ..., 55, away from the
 # busy top of the hour) delete Vultr bare-metal servers labelled sila-s8-*
-# AND tagged sila-s8 that are 5 h 50 min old or older, not active/pending,
-# or past their sila-s8-delete-after tag, AND (connection gate, --health)
-# any such server that shows no SSH banner on port 22 fifteen minutes after
-# creation (checked twice, 60 s apart) or whose own /health reports a failed
-# run. A gate deletion fails this run on purpose, so GitHub notifies the
-# owner. The key (secret VULTR_REAPER_API_KEY) is never printed.
-# vultr_provision.py refuses to create a server unless this workflow's
-# latest scheduled run on main succeeded within the last 30 minutes.
+# AND tagged sila-s8 that are 5 h 50 min old or older, not active/pending, or past
+# their sila-s8-delete-after tag. The key (secret VULTR_REAPER_API_KEY) is
+# never printed.
 #
 # The key belongs to a separate Vultr IAM service user whose policy allows
 # only compute.baremetal.List, Read and Delete (no Create, no billing, no
@@ -20,6 +15,11 @@
 # main key keeps its own address restriction. Every run first proves the
 # delete permission (--probe-delete: DELETE of a non-existent id must
 # answer 404, not 401/403), so a revoked or downgraded key fails visibly.
+#
+# DORMANT by the owner's decision (2026-11-19: the owner deletes the Vultr
+# server manually). It runs only once on main AND with the secret set; if
+# enabled it WOULD delete an S-8 server automatically at 5 h 50 min. Leave the
+# secret unset (or disable this workflow in Actions) to keep deletion manual.
 name: S-8 billing guard (Vultr reaper)
 
 on:
@@ -50,4 +50,4 @@ jobs:
         env:
           VULTR_API_KEY: ${{ secrets.VULTR_REAPER_API_KEY }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
-        run: python3 -I autonomous/vultr_reaper.py $DRY_RUN --probe-delete --health --max-age-min 350
+        run: python3 -I autonomous/vultr_reaper.py $DRY_RUN --probe-delete --max-age-min 350

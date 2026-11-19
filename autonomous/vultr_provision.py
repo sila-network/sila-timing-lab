@@ -10,29 +10,33 @@ repository or a log.
 
   vultr_provision.py quote  [--region R]
   vultr_provision.py create --region R --lab-sha SHA --pubkey B64 --ssh-pubkey FILE.pub --approved PLAN@REGION@MAXUSD
+  vultr_provision.py check  <id> [--minutes 15]   # read-only: follow phase 1, alert
   vultr_provision.py show   <id>
   vultr_provision.py delete <id>          # deletes, then confirms 404
 
 create refuses unless:
   - the plan is exactly vbm-6c-32gb-amd (AMD EPYC 4245P) and is available
     in the region now;
-  - the 6-hour worst case (reaper deadline 5 h + one guard interval) stays
-    within the approved MAXUSD and within BUDGET_USD (10);
+  - the 6-hour cost estimate (setup + the 5 h measurement bound, rounded
+    up) stays within the approved MAXUSD and within BUDGET_USD (10); the
+    real cost depends on when the owner deletes the server;
   - --approved names this exact plan, region and limit, as the owner
     approved it;
-  - the independent billing guard is live: the latest run of the scheduled
-    GitHub workflow s8-vultr-reaper.yml on main succeeded within the last
-    GUARD_MAX_AGE_MIN minutes (each real run proves the bare-metal delete
-    permission and applies the 15-minute SSH connection gate), so a
-    server that never becomes reachable is deleted without any operator or
-    Claude session;
   - --ssh-pubkey is one OpenSSH PUBLIC key (recovery and phase-1 check).
 
 The server gets the label "sila-s8-amd64", the tags "sila-s8" and
-"sila-s8-delete-after=<creation + 5 h 50 min>", so the guard selects it,
-and the cloud-init of build_cloud_init.py for the given lab commit. After
-creation, dispatch the watchdog workflow (s8-vultr-watchdog.yml) at once:
-it applies the same gate every minute instead of every 10.
+"sila-s8-delete-after=<creation + 5 h 50 min>" (informational; only the
+dormant reaper workflow would act on it), and the cloud-init of
+build_cloud_init.py for the given lab commit.
+
+Deletion is MANUAL (owner's decision): nothing here deletes a server unless
+the owner runs "delete". "check" follows the server read-only right after
+creation: it polls the Vultr API and the unauthenticated plain-HTTP /health
+(phase only) and exits 0 once "phase 1: ok" (or later) is reported, 3 at
+once if the server reports "failed: ...", and 2 if nothing answers within
+--minutes; on 2 or 3 the owner should delete the server or open View
+Console. It runs in the operator's session, so it is an alert, not a
+billing guarantee.
 """
 import argparse
 import base64
@@ -49,18 +53,18 @@ sys.path.insert(0, here)
 import build_cloud_init  # noqa: E402
 
 API = os.environ.get("VULTR_API_URL", "https://api.vultr.com/v2")
-GH_API = os.environ.get("GITHUB_API_URL_S8", "https://api.github.com")
-for _u in (API, GH_API):
-    if _u not in ("https://api.vultr.com/v2", "https://api.github.com") and not _u.startswith("http://127.0.0.1:"):
-        raise SystemExit(f"refusing API URL {_u!r}")
-GUARD = "/repos/sila-network/sila-timing-lab/actions/workflows/s8-vultr-reaper.yml/runs?branch=main&event=schedule&per_page=1"
-GUARD_MAX_AGE_MIN = 30
+if API != "https://api.vultr.com/v2" and not API.startswith("http://127.0.0.1:"):
+    raise SystemExit(f"refusing API URL {API!r}")
+# /health of the server (plain HTTP, phase only); tests may use a local mock.
+HEALTH_URL = os.environ.get("S8_HEALTH_URL", "http://{ip}/health")
+if HEALTH_URL != "http://{ip}/health" and not HEALTH_URL.startswith("http://127.0.0.1:"):
+    raise SystemExit(f"refusing S8_HEALTH_URL {HEALTH_URL!r}")
 PLAN = "vbm-6c-32gb-amd"
 CPU = "EPYC 4245P"
 OS_ID = 2284  # Ubuntu 24.04 LTS x64
 LABEL = "sila-s8-amd64"
 BUDGET_USD = 10.0
-WORST_HOURS = 6.0   # deadline 5 h 50 min + one guard interval
+WORST_HOURS = 6.0   # setup + 5 h measurement bound, rounded up (deletion is manual)
 EXPECTED_HOURS = 3.5
 DEADLINE_S = 350 * 60
 
@@ -118,25 +122,6 @@ def quote(region):
     return p, avail
 
 
-def guard_ready(now=None):
-    """The scheduled guard on main ran successfully within GUARD_MAX_AGE_MIN."""
-    now = now or dt.datetime.now(dt.timezone.utc)
-    try:
-        with urllib.request.urlopen(urllib.request.Request(GH_API + GUARD, headers={"Accept": "application/vnd.github+json"}), timeout=30) as r:
-            runs = json.loads(r.read()).get("workflow_runs", [])
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
-        return f"cannot read the guard's runs ({type(e).__name__}); it may not be on main yet"
-    if not runs:
-        return "the guard workflow has no scheduled run on main"
-    r = runs[0]
-    if r.get("status") != "completed" or r.get("conclusion") != "success":
-        return f"the latest guard run is {r.get('status')}/{r.get('conclusion')} ({r.get('html_url')})"
-    age = now - dt.datetime.fromisoformat(r["updated_at"].replace("Z", "+00:00"))
-    if age > dt.timedelta(minutes=GUARD_MAX_AGE_MIN):
-        return f"the latest successful guard run is {age} old (more than {GUARD_MAX_AGE_MIN} min)"
-    return None
-
-
 def create(a):
     p = plan()
     h = float(p["hourly_cost"])
@@ -155,9 +140,6 @@ def create(a):
     if "PRIVATE KEY" in ssh_pubkey:
         raise SystemExit("--ssh-pubkey names a PRIVATE key; give the .pub file")
     user_data = build_cloud_init.build(a.pubkey, a.lab_sha, ssh_pubkey)
-    why = guard_ready()
-    if why:
-        raise SystemExit(f"billing guard not proven live: {why}; refusing to create a billed server")
     deadline = int(time.time()) + DEADLINE_S
     d = ok("POST", "/bare-metals", {
         "region": a.region, "plan": PLAN, "os_id": OS_ID, "label": LABEL, "hostname": LABEL,
@@ -167,8 +149,8 @@ def create(a):
     })["bare_metal"]
     print(json.dumps({k: d.get(k) for k in ("id", "label", "tags", "status", "main_ip", "region", "plan", "date_created")}))
     print(f"delete-after: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(deadline))}")
-    print("NEXT: dispatch .github/workflows/s8-vultr-watchdog.yml now (1-minute connection gate; "
-          "deletes the server if SSH is not up 15 min after creation)")
+    print(f"NEXT: vultr_provision.py check {d.get('id')}  (read-only; alerts if phase 1 is not reached in 15 min). "
+          "Deletion is manual: Vultr console -> server -> Destroy.")
 
 
 def show(sid):
@@ -181,6 +163,42 @@ def show(sid):
     s = d["bare_metal"]
     print(json.dumps({k: s.get(k) for k in ("id", "label", "tags", "status", "server_status", "power_status",
                                             "main_ip", "os", "cpu_count", "date_created")}))
+
+
+def check(sid, minutes, interval=30):
+    """Read-only: 0 = phase 1 ok (or later), 2 = no answer in time, 3 = server reports failure."""
+    end = time.time() + minutes * 60
+    last = None
+    while True:
+        code, d = call("GET", f"/bare-metals/{sid}")
+        if code == 404:
+            print(f"{sid}: gone (404)")
+            return 4
+        s = d.get("bare_metal", {}) if code < 300 else {}
+        ip = s.get("main_ip", "")
+        phase = None
+        if ip and ip != "0.0.0.0":
+            try:
+                with urllib.request.urlopen(HEALTH_URL.format(ip=ip), timeout=15) as r:
+                    phase = r.read(300).decode("utf-8", "replace").strip()
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                phase = None
+        line = f"vultr status={s.get('status')} power={s.get('power_status')} ip={ip or '-'} health={phase or 'no answer'}"
+        if line != last:
+            print(time.strftime("%H:%M:%SZ", time.gmtime()), line, flush=True)
+            last = line
+        p = (phase or "").split(" ", 1)[-1]
+        if p.startswith("failed"):
+            print(f"ALERT: the server reports a failed run ({p}). Diagnose via SSH/View Console, then delete it manually.")
+            return 3
+        if p.startswith(("phase 1: ok", "phase 2", "measuring", "resuming", "evaluating", "done", "already finished")):
+            print("phase 1 ok: SSH, firewall, cloud-init, GitHub, Go and SILA verified on the server")
+            return 0
+        if time.time() >= end:
+            print(f"ALERT: phase 1 not reached within {minutes:g} min (health: {phase or 'no answer'}). "
+                  "Check SSH / Vultr View Console now, or delete the server manually to stop billing.")
+            return 2
+        time.sleep(interval)
 
 
 def delete(sid):
@@ -209,11 +227,17 @@ def main(argv):
     c.add_argument("--ssh-pubkey", required=True, help="file with ONE OpenSSH public key")
     for n in ("show", "delete"):
         sub.add_parser(n).add_argument("id")
+    k = sub.add_parser("check")
+    k.add_argument("id")
+    k.add_argument("--minutes", type=float, default=15)
+    k.add_argument("--interval", type=float, default=30)
     a = ap.parse_args(argv)
     if a.cmd == "quote":
         quote(a.region)
     elif a.cmd == "create":
         create(a)
+    elif a.cmd == "check":
+        sys.exit(check(a.id, a.minutes, a.interval))
     elif a.cmd == "show":
         show(a.id)
     else:

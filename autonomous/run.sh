@@ -33,6 +33,7 @@ MAX_ATTEMPTS=3
 STATE=${SILA_S8_STATE:-/var/lib/sila-s8}
 BASE=${SILA_S8_HOME:-/opt/sila-s8}
 SYS=${SILA_S8_SYS:-/sys}
+AUTHKEYS=${SILA_S8_AUTHKEYS:-/root/.ssh/authorized_keys}
 PROC=${SILA_S8_PROC:-/proc}
 OUT=$STATE/out
 mkdir -p "$OUT"
@@ -73,6 +74,14 @@ cp "$BASE/lab.txt" "$OUT/lab.txt" 2>/dev/null || true
 timeout 900 cloud-init status --wait >/dev/null 2>&1
 cloud-init status 2>/dev/null | grep -q '^status: done' || fail "cloud-init did not finish (status: $(cloud-init status 2>&1 | head -1))"
 ss -Hltn 'sport = :22' 2>/dev/null | grep -q . || fail "SSH is not listening on port 22"
+# Key only, as configured: the EFFECTIVE sshd settings, not the file we wrote
+# (a provider drop-in could override it), and the owner's key installed.
+eff=$(sshd -T -C user=root,host=check,addr=127.0.0.1 2>/dev/null)
+printf '%s\n' "$eff" | grep -qx 'passwordauthentication no' || fail "SSH password login is enabled"
+printf '%s\n' "$eff" | grep -qx 'kbdinteractiveauthentication no' || fail "SSH keyboard-interactive login is enabled"
+printf '%s\n' "$eff" | grep -qx 'pubkeyauthentication yes' || fail "SSH public-key login is disabled"
+grep -qE '(^|[[:space:]])(ssh-ed25519|ecdsa-sha2-nistp(256|384)|sk-ssh-ed25519@openssh.com|ssh-rsa) ' "$AUTHKEYS" 2>/dev/null ||
+	fail "owner's SSH public key is not installed for root"
 nft list ruleset 2>/dev/null | grep -q 'tcp dport { 22, 80, 443 } accept' || fail "firewall does not admit 22/80/443"
 timeout 120 git ls-remote "$SILA_REPO" >/dev/null 2>&1 || fail "GitHub (SILA repository) not reachable"
 
