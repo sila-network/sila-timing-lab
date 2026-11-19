@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Ahmed Ibrahim
 #
-# Billing guard for an S-8 server on Vultr bare metal, independent of any
-# operator session: every 10 minutes (minutes 5, 15, ..., 55, away from the
-# busy top of the hour) delete Vultr bare-metal servers labelled sila-s8-*
-# AND tagged sila-s8 that are 5 h old or older, not active/pending, or past
+# MANUAL cleanup for S-8 servers on Vultr bare metal. NOT a billing guard:
+# by the owner's decision (2026-11-19) the Vultr server is deleted manually,
+# so this workflow has NO schedule and runs only when dispatched by hand
+# (dry run by default). When dispatched with dry_run=false it would delete
+# Vultr bare-metal servers labelled sila-s8-*
+# AND tagged sila-s8 that are 5 h 50 min old or older, not active/pending, or past
 # their sila-s8-delete-after tag. The key (secret VULTR_REAPER_API_KEY) is
 # never printed.
 #
@@ -15,11 +17,12 @@
 # main key keeps its own address restriction. Every run first proves the
 # delete permission (--probe-delete: DELETE of a non-existent id must
 # answer 404, not 401/403), so a revoked or downgraded key fails visibly.
-name: S-8 billing guard (Vultr reaper)
+#
+# The secret is NOT set; without it every run fails before touching
+# anything. Never add a schedule here while deletion is manual.
+name: S-8 Vultr cleanup (manual dispatch only)
 
 on:
-  schedule:
-    - cron: "5-59/10 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -45,4 +48,4 @@ jobs:
         env:
           VULTR_API_KEY: ${{ secrets.VULTR_REAPER_API_KEY }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
-        run: python3 -I autonomous/vultr_reaper.py $DRY_RUN --probe-delete --max-age-min 300
+        run: python3 -I autonomous/vultr_reaper.py $DRY_RUN --probe-delete --max-age-min 350

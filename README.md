@@ -25,25 +25,27 @@ runners registered only here, never on the public SILA repository.
 | `runner/register.sh` | Registers this machine as an ephemeral runner (one job, then it deregisters itself). The runner package is checksum-verified. The token is read hidden, never logged. |
 | `runner/cloud-init-amd64.yaml` | Elastic Metal x86-64. Isolates core 2, turns SMT and automatic updates off, installs `register.sh` and reboots. It contains **no token or other secret**. |
 
-## Autonomous x86-64 server (no runner, no login, no secret)
+## Autonomous x86-64 server (no runner, no secret)
 
 `autonomous/` runs the same measurement on an Elastic Metal server driven
-only through the Scaleway API. Nobody logs in to the server, and no GitHub
-runner or token is involved.
+only through the provider API (Scaleway or Vultr). No GitHub runner or
+token is involved; SSH (owner's key only) exists for recovery.
 
 How it works:
-- **Build:** `build_cloud_init.py <collector public key> <lab commit>`
+- **Build:** `build_cloud_init.py <collector public key> <lab commit> <SSH public key>`
   writes the cloud-init. It embeds `run.sh`, `serve.py`, `endpoint.sh` and
   `scripts/check_evidence.sh` from this commit, plus the collector's
-  Ed25519 **public** key. It contains no token, password or private key.
-- **First boot:**
-  - SSH is turned off.
-  - The firewall drops everything except 80/443.
+  Ed25519 **public** key and the owner's SSH **public** key. It contains no
+  token, password or private key.
+- **Single boot, no reboot** (see "Two phases" in the Vultr section):
+  - Provider firewalls are switched off at the start of boot.
+  - The firewall drops everything except 22/80/443; SSH is key-only.
   - Caddy obtains a Let's Encrypt certificate for `<ip>.sslip.io`.
-  - Core 2 is isolated, SMT is turned off, then the server reboots.
-- **Second boot:** `run.sh` runs once. It only starts if the isolation is
-  active, and performs, with unchanged criteria:
-  1. the preflight (rejects VMs);
+- **`run.sh`** starts when cloud-init has finished, is resumable, and
+  performs, with unchanged criteria:
+  1. phase 1: cloud-init done, SSH, firewall, GitHub, the preflight
+     (rejects VMs); then phase 2: runtime-only isolation (SMT off, CPU 2
+     reserved);
   2. Go 1.25.14, checksum-verified;
   3. SILA at `75939d5`, exact SHA and clean tree;
   4. `scripts/timing_dedicated.sh 1000000 10 2`;
@@ -57,11 +59,13 @@ How it works:
   - On the server: the downloads and the source fetch are bounded, the
     measurement is limited to 5 h (exit 124, never counted), and the
     systemd unit to 6 h.
-  - On the operator side: the server is deleted through the API as soon as
-    results are collected, or at creation + 6 h at the latest, whatever
-    the outcome. Reminders are set at creation.
-- **Billing guard.** Two deletion mechanisms, independent of each other and
-  of the operator's session. Both use `autonomous/reaper.py`.
+  - On the operator side (Scaleway): the server is deleted through the API
+    as soon as results are collected, or at creation + 6 h at the latest.
+    On Vultr the owner deletes it manually.
+- **Billing guard (Scaleway path only).** Two deletion mechanisms,
+  independent of each other and of the operator's session. Both use
+  `autonomous/reaper.py`. For Vultr there is NO automatic deletion: the
+  owner deletes the server manually (see the Vultr section).
   - **Selection:** a server is deleted only if all three hold:
     - its `project_id` is the S-8 project (the listing is filtered by
       project, and each item is checked again);
@@ -320,23 +324,126 @@ the price.
 ## Vultr x86-64 run (AMD EPYC 4245P, `vbm-6c-32gb-amd`)
 
 The server is created by `autonomous/vultr_provision.py` with the cloud-init
-of `build_cloud_init.py` (no login, no secret; results are collected with
-`collect.py` over signed HTTPS requests). The API key is never handled by
-these scripts: the operator session's network proxy injects it.
+of `build_cloud_init.py`; results are collected with `collect.py` over
+signed HTTPS requests. The API key is never handled by these scripts (the
+operator session's network proxy injects it) and never reaches the server,
+cloud-init, the repository or a log.
 
-| Guard | Where | Interval | Key and address |
-|---|---|---|---|
-| Deletion guard 1 | Claude scheduled task, fresh session per run | hourly, minute 17 | proxy-injected; Vultr allowlist `160.79.106.0/24` |
-| Deletion guard 2 | Claude scheduled task, fresh session per run | hourly, minute 47 | as above |
-| Independent guard | `.github/workflows/s8-vultr-reaper.yml` | every 10 min | IAM service user limited to `compute.baremetal.List/Read/Delete`; its own allowlist |
+### What went wrong on 2026-11-16 (server `1cd82ef2…`, $8.35, no measurement)
 
-Every guard run proves that it can really delete a bare-metal server
-before reaping: DELETE of a non-existent server must answer 404, not
-401/403 (`--probe-delete`, implied by every real run). The Claude tasks
-also run `--canary` (a free startup script is created, deleted and
-confirmed 404). Startup-script and bare-metal deletion are separate IAM
-permissions, so the canary never replaces the probe. Each guard deletes `sila-s8-*` servers tagged `sila-s8` at 5 h
-or after their `sila-s8-delete-after` tag, so the worst case is 6 h:
-6 × $0.41 = $2.46 before tax. `vultr_provision.py create` refuses to run
-without the owner's approved `PLAN@REGION@MAXUSD`, above the $10 budget, or
-while another S-8 server exists.
+Evidence: the server was `active`/`running` in the Vultr API from 14:43 UTC;
+port 80 and 443 never answered in two hours of probes every minute, nor at
+16:45 or 09:09 the next day (the egress gateway reported *connection
+timeout*: packets dropped, not refused); a control probe of another public
+address through the same gateway answered, so the path from the operator
+side worked. The stored cloud-init passed `cloud-init schema` and `nft -c`.
+With our nftables rules active on a running host, a closed port 80 would
+have been refused, not timed out, so the host was not running with our
+rules; the cause cannot be narrowed further without the console (it is
+behind a browser check). Two causes remain possible and both are removed:
+
+| Possible cause | Old design | Now |
+|---|---|---|
+| Host did not come back from the cloud-init reboot with `isolcpus/nohz_full/nosmt` | grub change + `reboot` in runcmd | no reboot, no boot setting; isolation is runtime-only (phase 2) and undone by any reboot |
+| Provider firewall (ufw) still dropping 80/443 (runcmd not reached) | ufw switched off late, in runcmd | ufw/firewalld off in `bootcmd`, first thing on every boot |
+| No way in to diagnose | SSH disabled by design | SSH on 22, key only (owner's public key), plus Vultr View Console |
+| Billing for 18.6 h unnoticed | no early signal; nothing reachable | `check` reports phase 1, failure or silence within 15 min (plain-HTTP `/health`); deletion stays manual |
+
+### Two phases
+
+1. **Phase 1, stock boot** (no reboot): provider firewalls off at boot;
+   nftables admits 22/80/443; SSH key-only; `run.sh` starts when
+   cloud-init has finished and checks: cloud-init `status: done`, SSH
+   listening on 22, firewall, bare metal (`systemd-detect-virt` = `none`,
+   unchanged), root, GitHub reachable, Go 1.25.14 checksum-verified, SILA at
+   `75939d59…` clean, DIT wrapper compiled. Any failure stops the run as
+   `failed: …` before the measurement.
+2. **Phase 2, only after "phase 1: ok"**: SMT off at runtime, system/user
+   slices confined to the other CPUs (`systemctl set-property --runtime`),
+   IRQs moved off CPU 2; the measurement runs in its own `sila-s8.slice`.
+   Nothing is written to the boot configuration; a reboot restores the
+   stock, reachable state. Then the unchanged
+   `./scripts/timing_dedicated.sh 1000000 10 2` (bounded at 5 h) and
+   `check_evidence.sh`; only an accepted evidence check reports
+   `done: PASS`.
+
+Resumable: verified steps are not redone after a restart or reboot; an
+interrupted measurement is never continued or counted (its partial output is
+moved out of the result directory) and starts again, at most 3 attempts.
+The phase is visible without credentials at `http://<ip>/health` (also over
+HTTPS; last status line only; results need the collector's signature).
+Phase 1 also checks the EFFECTIVE sshd settings (`sshd -T`: password and
+keyboard-interactive login off, public key on) and that the owner's key is
+installed for root.
+
+### Deletion is manual (owner's decision, 2026-11-19)
+
+The owner deletes the server in the Vultr console. Nothing in this lab
+deletes a server unless the owner runs `vultr_provision.py delete <id>`.
+
+| Automatic deletion logic | State | Conflict with manual deletion |
+|---|---|---|
+| `.github/workflows/s8-vultr-reaper.yml` (`vultr_reaper.py`) | **no schedule** (manual dispatch only, dry run by default); not on main; secret `VULTR_REAPER_API_KEY` not set | none: it can only run when someone dispatches it by hand with dry_run=false **and** the secret exists. |
+| Claude scheduled tasks "SILA S-8 Vultr deletion guard 1/2" | **disabled** since 2026-11-15 | none while disabled |
+| Scaleway reaper / Serverless Job | other provider | none for Vultr |
+
+`vultr_provision.py create` requires no guard. Right after creation, run
+the read-only follow-up (it never deletes):
+
+```
+python3 -I autonomous/vultr_provision.py check <server id>     # up to 15 min
+```
+
+Exit 0: phase 1 ok (SSH, firewall, cloud-init, GitHub, Go, SILA verified on
+the server). Exit 2: no phase 1 within 15 min. Exit 3: the server reports
+`failed: …`. On 2 or 3: SSH in or open View Console, or delete the server
+to stop billing. It uses the plain-HTTP `/health` (phase only), so it does
+not depend on the TLS certificate. It runs in the operator's session: an
+alert, not a billing guarantee.
+
+### Cost (vbm-6c-32gb-amd, $0.41/h before tax; checked 2026-11-19, available in ewr)
+
+| Step | Time | Cost |
+|---|---|---|
+| Install + cloud-init + phase 1 | ~10–15 min | ~$0.10 |
+| Measurement 1,000,000 × 10 | ~45 min measured-scale estimate (20,000 × 2 took 11.3 s on a 2.1 GHz Xeon VM; ×250); bounded at 5 h | ~$0.30–0.60 expected |
+| Server left running after `done` | until the owner deletes it | $0.41 per hour |
+
+### Collecting the evidence
+
+Over HTTPS (needs the certificate): `collect.py fetch https://<ip-with-dashes>.sslip.io <collector.key> results/amd64-baremetal`.
+sslip.io is not on the Public Suffix List, so Let's Encrypt issuance can be
+rate-limited; if HTTPS does not come up, collect over SSH (owner's key):
+
+```
+scp -r root@<ip>:/var/lib/sila-s8/out results/amd64-baremetal
+(cd results/amd64-baremetal && sha256sum -c SHA256SUMS)
+bash scripts/check_evidence.sh results/amd64-baremetal amd64-baremetal full 75939d59602318e8eb3561b150cf0944035a03b5
+```
+
+### Not proven before a real run
+
+The simulations and the real tools (cloud-init schema, nftables in a
+network namespace, Caddy, sshd -T, the Go download, the official timing
+script at reduced size) cannot prove that the Vultr image boots this
+cloud-init as intended, that Vultr's network delivers 22/80/443, or that a
+certificate is issued. `check` answers the first two within 15 minutes.
+
+### Recovery through Vultr View Console
+
+If the server does not answer: my.vultr.com → Products → `sila-s8-amd64`
+→ **View Console** (top right). Log in as `root` with the password shown
+on the server's Overview page. Useful commands:
+
+```
+cloud-init status --long          # done / error / running
+journalctl -u cloud-final -b --no-pager | tail -50
+systemctl status ssh nftables sila-s8-measure caddy --no-pager
+nft list ruleset; ufw status
+cat /var/lib/sila-s8/status       # phases of run.sh
+ip -4 addr; ip route              # network up?
+```
+
+`ufw --force disable && systemctl restart nftables` reopens 22/80/443;
+`reboot` (or Vultr → Restart) undoes phase 2. Results stay in
+`/var/lib/sila-s8/out` across reboots; reinstalling the OS erases them.

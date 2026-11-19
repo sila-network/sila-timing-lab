@@ -78,6 +78,15 @@ expect("symlink", code("/files/link.txt"), 404)
 expect("traversal", code("/files/../secret.txt"), 404)
 expect("encoded traversal", code("/files/..%2Fsecret.txt"), 404)
 expect("unknown path", code("/"), 404)
+def plain(path):
+    try:
+        with urllib.request.urlopen(base + path) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+expect("unsigned /health: last phase line only", plain("/health"), (200, "measuring\n"))
+expect("unsigned /health never exposes results", plain("/health?x")[0], 403)
+expect("unsigned /files still refused", plain("/files")[0], 403)
 expect("POST", code("/status", method="POST"), 501)
 expect("file list excludes hidden and links", collect.get(base, priv, "/files").decode().split(), ["timing.txt"])
 srv.shutdown()

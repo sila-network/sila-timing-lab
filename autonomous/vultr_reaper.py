@@ -3,13 +3,16 @@
 # Copyright 2026 Ahmed Ibrahim
 """Deletes S-8 Vultr bare-metal servers that have outlived their deadline.
 
-Runs on a schedule independent of the operator's session, with the Vultr
-API key from the environment variable VULTR_API_KEY (never printed).
+Optional cleanup tool, run only by hand: by the owner's decision
+(2026-11-19) Vultr servers are deleted manually, and the workflow that wraps
+this script has no schedule (workflow_dispatch only, dry run by default).
+The Vultr API key comes from VULTR_API_KEY (never printed).
 
 A bare-metal server is a candidate only if BOTH hold:
   - its label starts with "sila-s8-",
   - it carries the tag "sila-s8".
-A candidate is deleted when it is at least MAX_AGE old (default 5 h), or
+A candidate is deleted when it is at least MAX_AGE old (default 5 h 50 min:
+setup plus the 5 h measurement bound must fit before it), or
 its tag "sila-s8-delete-after=<unix time>" has passed (or is malformed), or
 its status is not active/pending (errored servers keep billing too).
 Other servers are never touched.
@@ -19,7 +22,7 @@ access denied (401/403, including a refused source IP), connection failure,
 timeout (VULTR_TIMEOUT seconds, default 30), an incomplete listing, or a
 failed deletion. A 404 on deletion (already removed) is not a failure.
 
-  vultr_reaper.py [--dry-run | --canary] [--probe-delete] [--max-age-min 300]
+  vultr_reaper.py [--dry-run | --canary] [--probe-delete] [--max-age-min 350]
 
 --canary proves that this key, from this source address, can really
 delete: it creates a free startup script named "sila-s8-canary-<time>",
@@ -154,7 +157,7 @@ def _main(argv):
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--canary", action="store_true")
     ap.add_argument("--probe-delete", action="store_true")
-    ap.add_argument("--max-age-min", type=int, default=300)
+    ap.add_argument("--max-age-min", type=int, default=350)
     a = ap.parse_args(argv)
     key = os.environ.get("VULTR_API_KEY", "")
     if not key:

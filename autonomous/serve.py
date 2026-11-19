@@ -9,6 +9,11 @@ request must carry X-SILA-S8-Auth: <unix time>:<base64 Ed25519 signature of
 holds only the public key, which is not a secret. Requests older or newer
 than 5 minutes, unsigned or wrongly signed requests, other methods, other
 paths and anything but plain files in the result directory are refused.
+
+One exception: GET /health needs no signature and returns only the last
+line of the status file (time and phase, e.g. "... measuring" or
+"... failed: <reason>"), so the owner's read-only "vultr_provision.py check" can follow a
+failed run without holding the collector key. It never returns results.
 """
 import base64
 import http.server
@@ -66,6 +71,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == "/health":
+            try:
+                lines = open(os.path.join(ROOT, "status"), "rb").read().splitlines()
+                return self.reply(200, (lines[-1] if lines else b"starting") + b"\n")
+            except OSError:
+                return self.reply(200, b"starting\n")
         if not authorized(self.path, self.headers.get("X-SILA-S8-Auth", "")):
             return self.reply(403)
         if self.path == "/status":

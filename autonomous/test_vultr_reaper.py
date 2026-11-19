@@ -25,7 +25,7 @@ def bm(label, age, tags=("sila-s8",), status="active"):
     return {"id": label, "label": label, "status": status, "date_created": iso(age), "tags": list(tags)}
 
 
-base = [bm("sila-s8-old", 5 * H + dt.timedelta(minutes=1)), bm("sila-s8-young", H),
+base = [bm("sila-s8-old", 5 * H + dt.timedelta(minutes=51)), bm("sila-s8-measuring", 5 * H + dt.timedelta(minutes=10)), bm("sila-s8-young", H),
         bm("sila-s8-deadline", dt.timedelta(minutes=20), ("sila-s8", f"sila-s8-delete-after={int(now.timestamp()) - 1}")),
         bm("sila-s8-stuck", dt.timedelta(minutes=10), status="locked"),
         bm("sila-s8-notag", 40 * H, tags=()), bm("prod-db", 900 * H, tags=())]
@@ -125,7 +125,7 @@ rc, out, _ = run("--dry-run")
 expect("dry run deletes nothing", (rc, deleted), (0, []))
 rc, out, _ = run()
 expect("deletes old, deadline-passed and stuck S-8 servers only", (rc, sorted(deleted)), (0, ["sila-s8-deadline", "sila-s8-old", "sila-s8-stuck"]))
-for n in ("sila-s8-young", "sila-s8-notag", "prod-db"):
+for n in ("sila-s8-young", "sila-s8-measuring", "sila-s8-notag", "prod-db"):
     expect(f"never touches {n}", n in deleted, False)
 expect("key never printed", "Bearer k" in out or " k " in out, False)
 st["filler"] = [bm(f"other-{i}", 2000 * H, tags=()) for i in range(150)]
