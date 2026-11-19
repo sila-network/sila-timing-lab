@@ -145,13 +145,16 @@ jobs:
           python3 -m py_compile autonomous/vultr_reaper.py autonomous/vultr_provision.py
           python3 -I autonomous/test_vultr_reaper.py
           python3 -I autonomous/test_vultr_provision.py
-          # Owner's decision: deletion is manual. The reaper workflow stays
-          # dormant (no secret) and, if ever enabled, must not cut a valid
-          # measurement short (5 h bound + setup < 350 min). No other
-          # automatic deletion exists.
+          # Owner's decision: deletion is manual. The Vultr reaper workflow
+          # has no schedule (manual dispatch, dry run by default), and if run
+          # by hand it must not cut a valid measurement short (5 h bound +
+          # setup < 350 min). No other automatic deletion exists.
           w=.github/workflows/s8-vultr-reaper.yml
           grep -q -- '--probe-delete --max-age-min 350' $w
-          grep -q 'DORMANT by the owner' $w
+          # Never scheduled while deletion is manual (owner's decision).
+          if grep -nE '^\s+schedule:|cron:' $w; then echo "::error::scheduled Vultr deletion"; exit 1; fi
+          grep -q '^  workflow_dispatch:' $w
+          grep -q 'default: true' $w
           if ls .github/workflows | grep -q watchdog; then echo "::error::unexpected automatic-deletion workflow"; exit 1; fi
           if grep -n 'DELETE' autonomous/vultr_provision.py | grep -v 'def delete\|call("DELETE", f"/bare-metals/{sid}")'; then echo "::error::unexpected deletion path in vultr_provision.py"; exit 1; fi
           echo "Vultr: manual deletion, dormant reaper ok"

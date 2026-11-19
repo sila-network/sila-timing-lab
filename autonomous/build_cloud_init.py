@@ -123,7 +123,7 @@ def build(pubkey, lab_sha, ssh_pubkey):
         "      Slice=sila-s8.slice",
         "      ExecStart=/bin/bash /opt/sila-s8/run.sh",
         "      # Hard bound: run.sh limits each step (measurement 5 h); this stops",
-        "      # anything else that hangs. Deletion is enforced by the billing guard.",
+        "      # anything else that hangs. The owner deletes the server manually (Vultr console).",
         "      TimeoutStartSec=6h",
         "      [Install]",
         "      WantedBy=multi-user.target",

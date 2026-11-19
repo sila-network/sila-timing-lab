@@ -128,7 +128,7 @@ st["server"] = {"id": "s1", "status": "active", "power_status": "running", "main
 def chk(*extra):
     st["posts"].clear(); st["deletes"].clear()
     p = subprocess.run([sys.executable, "-I", os.path.join(here, "vultr_provision.py"), "check", "s1", "--interval", "0.2", *extra],
-                       env={**os.environ, "VULTR_API_URL": URL, "S8_HEALTH_URL": URL + "/health?ip={ip}"}, capture_output=True, text=True, timeout=60)
+                       env={**os.environ, "VULTR_API_URL": URL, "S8_HEALTH_URL": URL + "/health?ip={ip}"}, capture_output=True, text=True, timeout=120)
     return p.returncode, p.stdout, st["deletes"], st["posts"]
 st["health"] = "2026-11-19T10:05:00Z phase 1: ok"
 rc, out, dels, posts = chk()
@@ -146,6 +146,29 @@ expect("check: no answer within the limit -> exit 2, ALERT to delete manually, n
 st["health"] = "2026-11-19T10:01:00Z phase 1: checks"
 rc, out, dels, _ = chk("--minutes", "0.02")
 expect("check: stuck before phase 1 ok -> exit 2", (rc, dels), (2, []))
+# check --collector-key: the REAL serve.py and collect.py signing path
+ss = os.path.join(tmp, "srv"); os.makedirs(os.path.join(ss, "out"))
+open(os.path.join(ss, "status"), "w").write("2026-11-19T10:05:00Z phase 1: ok\n")
+ck = os.path.join(tmp, "collector.key"); other = os.path.join(tmp, "other.key")
+cpub = subprocess.run([sys.executable, os.path.join(here, "collect.py"), "keygen", ck], check=True, capture_output=True, text=True).stdout.strip()
+subprocess.run([sys.executable, os.path.join(here, "collect.py"), "keygen", other], check=True, capture_output=True)
+open(os.path.join(tmp, "collector.pub"), "w").write(cpub + "\n")
+import socket as _so
+_s = _so.socket(); _s.bind(("127.0.0.1", 0)); sport = _s.getsockname()[1]; _s.close()
+code_ = f"import serve,http.server;http.server.ThreadingHTTPServer(('127.0.0.1',{sport}),serve.Handler).serve_forever()"
+srvp = subprocess.Popen([sys.executable, "-c", code_], cwd=here, env={**os.environ, "SILA_S8_STATE": ss, "SILA_S8_PUBKEY": os.path.join(tmp, "collector.pub")})
+import time as _t; _t.sleep(1.5)
+os.environ["S8_RESULTS_URL"] = f"http://127.0.0.1:{sport}"
+st["health"] = "2026-11-19T10:05:00Z phase 1: ok"
+rc, out, dels, _ = chk("--collector-key", ck)
+expect("check --collector-key: signed /status accepted by the real serve.py -> exit 0", (rc, "collection path ok" in out, dels), (0, True, []))
+rc, out, dels, _ = chk("--collector-key", other, "--minutes", "0.03")
+expect("check --collector-key: wrong key (403) -> exit 5 ALERT, nothing deleted", (rc, "ALERT" in out, dels), (5, True, []))
+srvp.terminate(); srvp.wait()
+rc, out, dels, _ = chk("--collector-key", ck, "--minutes", "0.03")
+expect("check --collector-key: endpoint down -> exit 5", (rc, dels), (5, []))
+expect("check never prints the collector private key", open(ck, "rb").read().hex() in out, False)
+del os.environ["S8_RESULTS_URL"]
 st["server"] = None
 expect("check: server gone -> exit 4", chk()[0], 4)
 p = subprocess.run([sys.executable, "-I", os.path.join(here, "vultr_provision.py"), "quote"],

@@ -3,8 +3,10 @@
 # Copyright 2026 Ahmed Ibrahim
 """Deletes S-8 Vultr bare-metal servers that have outlived their deadline.
 
-Runs on a schedule independent of the operator's session, with the Vultr
-API key from the environment variable VULTR_API_KEY (never printed).
+Optional cleanup tool, run only by hand: by the owner's decision
+(2026-11-19) Vultr servers are deleted manually, and the workflow that wraps
+this script has no schedule (workflow_dispatch only, dry run by default).
+The Vultr API key comes from VULTR_API_KEY (never printed).
 
 A bare-metal server is a candidate only if BOTH hold:
   - its label starts with "sila-s8-",

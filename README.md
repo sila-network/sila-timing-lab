@@ -59,11 +59,13 @@ How it works:
   - On the server: the downloads and the source fetch are bounded, the
     measurement is limited to 5 h (exit 124, never counted), and the
     systemd unit to 6 h.
-  - On the operator side: the server is deleted through the API as soon as
-    results are collected, or at creation + 6 h at the latest, whatever
-    the outcome. Reminders are set at creation.
-- **Billing guard.** Two deletion mechanisms, independent of each other and
-  of the operator's session. Both use `autonomous/reaper.py`.
+  - On the operator side (Scaleway): the server is deleted through the API
+    as soon as results are collected, or at creation + 6 h at the latest.
+    On Vultr the owner deletes it manually.
+- **Billing guard (Scaleway path only).** Two deletion mechanisms,
+  independent of each other and of the operator's session. Both use
+  `autonomous/reaper.py`. For Vultr there is NO automatic deletion: the
+  owner deletes the server manually (see the Vultr section).
   - **Selection:** a server is deleted only if all three hold:
     - its `project_id` is the S-8 project (the listing is filtered by
       project, and each item is checked again);
@@ -381,7 +383,7 @@ deletes a server unless the owner runs `vultr_provision.py delete <id>`.
 
 | Automatic deletion logic | State | Conflict with manual deletion |
 |---|---|---|
-| `.github/workflows/s8-vultr-reaper.yml` (`vultr_reaper.py`) | **dormant**: not on main, secret `VULTR_REAPER_API_KEY` not set | only if merged **and** the secret is set: it would delete an S-8 server at 5 h 50 min (or past its `sila-s8-delete-after` tag, or if not active/pending). Keep the secret unset, or disable the workflow in Actions, to keep deletion manual. |
+| `.github/workflows/s8-vultr-reaper.yml` (`vultr_reaper.py`) | **no schedule** (manual dispatch only, dry run by default); not on main; secret `VULTR_REAPER_API_KEY` not set | none: it can only run when someone dispatches it by hand with dry_run=false **and** the secret exists. |
 | Claude scheduled tasks "SILA S-8 Vultr deletion guard 1/2" | **disabled** since 2026-11-15 | none while disabled |
 | Scaleway reaper / Serverless Job | other provider | none for Vultr |
 

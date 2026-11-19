@@ -12,7 +12,7 @@ paths and anything but plain files in the result directory are refused.
 
 One exception: GET /health needs no signature and returns only the last
 line of the status file (time and phase, e.g. "... measuring" or
-"... failed: <reason>"), so the independent billing guard can stop a
+"... failed: <reason>"), so the owner's read-only "vultr_provision.py check" can follow a
 failed run without holding the collector key. It never returns results.
 """
 import base64

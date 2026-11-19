@@ -10,7 +10,7 @@ repository or a log.
 
   vultr_provision.py quote  [--region R]
   vultr_provision.py create --region R --lab-sha SHA --pubkey B64 --ssh-pubkey FILE.pub --approved PLAN@REGION@MAXUSD
-  vultr_provision.py check  <id> [--minutes 15]   # read-only: follow phase 1, alert
+  vultr_provision.py check  <id> [--minutes 15] [--collector-key FILE]   # read-only
   vultr_provision.py show   <id>
   vultr_provision.py delete <id>          # deletes, then confirms 404
 
@@ -35,7 +35,11 @@ creation: it polls the Vultr API and the unauthenticated plain-HTTP /health
 (phase only) and exits 0 once "phase 1: ok" (or later) is reported, 3 at
 once if the server reports "failed: ...", and 2 if nothing answers within
 --minutes; on 2 or 3 the owner should delete the server or open View
-Console. It runs in the operator's session, so it is an alert, not a
+Console. With --collector-key it also proves the evidence collection
+path: a request signed with the collector key for /status over HTTPS
+(<ip-with-dashes>.sslip.io, a publicly trusted certificate is required)
+must succeed; exit 5 if it does not within --minutes (then collect over
+SSH, or delete the server). It runs in the operator's session, so it is an alert, not a
 billing guarantee.
 """
 import argparse
@@ -59,6 +63,9 @@ if API != "https://api.vultr.com/v2" and not API.startswith("http://127.0.0.1:")
 HEALTH_URL = os.environ.get("S8_HEALTH_URL", "http://{ip}/health")
 if HEALTH_URL != "http://{ip}/health" and not HEALTH_URL.startswith("http://127.0.0.1:"):
     raise SystemExit(f"refusing S8_HEALTH_URL {HEALTH_URL!r}")
+RESULTS_URL = os.environ.get("S8_RESULTS_URL", "https://{dash}.sslip.io")
+if RESULTS_URL != "https://{dash}.sslip.io" and not RESULTS_URL.startswith("http://127.0.0.1:"):
+    raise SystemExit(f"refusing S8_RESULTS_URL {RESULTS_URL!r}")
 PLAN = "vbm-6c-32gb-amd"
 CPU = "EPYC 4245P"
 OS_ID = 2284  # Ubuntu 24.04 LTS x64
@@ -165,10 +172,23 @@ def show(sid):
                                             "main_ip", "os", "cpu_count", "date_created")}))
 
 
-def check(sid, minutes, interval=30):
-    """Read-only: 0 = phase 1 ok (or later), 2 = no answer in time, 3 = server reports failure."""
+def signed_status(ip, keyfile):
+    """True if /status answers to a request signed with the collector key."""
+    import collect  # needs python3-cryptography; only for --collector-key
+    try:
+        collect.get(RESULTS_URL.format(dash=ip.replace(".", "-")), keyfile, "/status")
+        return True
+    except Exception as e:  # TLS, HTTP 403, connection: all mean "not proven"
+        print(f"  signed HTTPS /status: not yet ({type(e).__name__})", flush=True)
+        return False
+
+
+def check(sid, minutes, interval=30, collector_key=None):
+    """Read-only: 0 = phase 1 ok (and, with a collector key, signed HTTPS collection works),
+    2 = no answer in time, 3 = server reports failure, 5 = collection path not proven in time."""
     end = time.time() + minutes * 60
     last = None
+    phase_ok = False
     while True:
         code, d = call("GET", f"/bare-metals/{sid}")
         if code == 404:
@@ -192,8 +212,18 @@ def check(sid, minutes, interval=30):
             print(f"ALERT: the server reports a failed run ({p}). Diagnose via SSH/View Console, then delete it manually.")
             return 3
         if p.startswith(("phase 1: ok", "phase 2", "measuring", "resuming", "evaluating", "done", "already finished")):
-            print("phase 1 ok: SSH, firewall, cloud-init, GitHub, Go and SILA verified on the server")
-            return 0
+            if not phase_ok:
+                print("phase 1 ok: SSH, firewall, cloud-init, GitHub, Go and SILA verified on the server", flush=True)
+                phase_ok = True
+            if not collector_key:
+                return 0
+            if signed_status(ip, collector_key):
+                print("collection path ok: signed HTTPS request accepted (collect.py fetch will work)")
+                return 0
+        if phase_ok and time.time() >= end:
+            print(f"ALERT: phase 1 is ok but signed HTTPS collection did not work within {minutes:g} min "
+                  "(certificate for <ip>.sslip.io missing?). Collect over SSH instead, or delete the server manually.")
+            return 5
         if time.time() >= end:
             print(f"ALERT: phase 1 not reached within {minutes:g} min (health: {phase or 'no answer'}). "
                   "Check SSH / Vultr View Console now, or delete the server manually to stop billing.")
@@ -231,13 +261,14 @@ def main(argv):
     k.add_argument("id")
     k.add_argument("--minutes", type=float, default=15)
     k.add_argument("--interval", type=float, default=30)
+    k.add_argument("--collector-key", help="collector PRIVATE key file (stays local); proves signed HTTPS collection")
     a = ap.parse_args(argv)
     if a.cmd == "quote":
         quote(a.region)
     elif a.cmd == "create":
         create(a)
     elif a.cmd == "check":
-        sys.exit(check(a.id, a.minutes, a.interval))
+        sys.exit(check(a.id, a.minutes, a.interval, a.collector_key))
     elif a.cmd == "show":
         show(a.id)
     else:
